@@ -31,7 +31,7 @@ using OutputSample = cy::common::CS16;  // 输出样本类型相同
 
 constexpr std::size_t kDefaultNumChannels = 16;       // 默认通道数
 constexpr std::size_t kDefaultNumPulses = 64;          // 默认脉冲数
-constexpr std::size_t kDefaultSamplesPerPulse = 512;   // 默认单脉冲样点数
+constexpr std::size_t kDefaultSamplesPerPulse = 4096;  // 默认单脉冲样点数 (133.33us)
 
 } // namespace cycore::algorithm::pulse_compression
 ```

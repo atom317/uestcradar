@@ -11,6 +11,6 @@ using OutputSample = cy::common::CS16;
 
 constexpr std::size_t kDefaultNumChannels = 16;
 constexpr std::size_t kDefaultNumPulses = 64;
-constexpr std::size_t kDefaultSamplesPerPulse = 512;
+constexpr std::size_t kDefaultSamplesPerPulse = 4096;
 
 } // namespace cycore::algorithm::pulse_compression

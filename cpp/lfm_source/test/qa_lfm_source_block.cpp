@@ -101,14 +101,14 @@ void test_invalid_diagnostic_params() {
     }
     {
         fg::ValueMap params;
-        params["amplitude"] = 8192.0;
+        params["amplitude"] = 32768.0;
         bool threw = false;
         try {
             (void)cy::flowgraph::blocks::common::LFMSource(params);
         } catch (const std::invalid_argument&) {
             threw = true;
         }
-        require(threw, "LFMSource must reject amplitude above 8191");
+        require(threw, "LFMSource must reject amplitude above 32767");
     }
     {
         fg::ValueMap params;

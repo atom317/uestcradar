@@ -65,7 +65,7 @@ LFMSource::LFMSource(const cy::flowgraph::ValueMap& params)
         throw std::invalid_argument(
             "LFMSource batch_size must be a positive multiple of num_channels");
     }
-    if (sample_rate_ <= 0.0 || amplitude_ < 0.0 || amplitude_ > 8191.0) {
+    if (sample_rate_ <= 0.0 || amplitude_ < 0.0 || amplitude_ > 32767.0) {
         throw std::invalid_argument("LFMSource waveform parameters are out of range");
     }
     if (samples_per_pulse_ >

@@ -24,3 +24,7 @@ add_executable(qa_pulse_compression_block
     test/qa_pulse_compression_block.cpp
 )
 
+add_executable(qa_pulse_compression_peak
+    src/algorithm.cpp
+    test/qa_pulse_compression_peak.cpp
+)

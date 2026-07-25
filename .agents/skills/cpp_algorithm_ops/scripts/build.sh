@@ -42,6 +42,7 @@ if [ "${ARCH}" = "x86" ]; then
     docker run --rm \
       --user "$(id -u):$(id -g)" \
       -v "${LOCAL_ROOT}:/workspace" \
+      -v "${LOCAL_ROOT}/../cycore:/workspace/cycore:ro" \
       -w /workspace/cpp \
       ${COMPILER_IMAGE} \
       bash -lc "cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j\$(nproc)"

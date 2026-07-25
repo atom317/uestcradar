@@ -20,9 +20,7 @@ fi
 source "$LOCAL_ENV"
 
 # 📌 2. 检查前置编译产物是否存在 (Phase 2)
-# 单测运行在本地 X86 上，检验 build 目录下是否有测试二进制文件
-TEST_BIN="${LOCAL_ROOT}/cpp/build/bin/cycore_fft_plugin"
-if [ ! -f "$TEST_BIN" ]; then
+if [ ! -d "${LOCAL_ROOT}/cpp/build" ] || [ -z "$(ls -A "${LOCAL_ROOT}/cpp/build/lib" "${LOCAL_ROOT}/cpp/build/bin" 2>/dev/null)" ]; then
     echo -e "\033[31m[🚨 中止: 编译产物缺失] 未发现 X86 编译产物，请确保在本地进行了同构编译！\033[0m"
     exit 1
 fi
@@ -35,9 +33,10 @@ set +e
 docker run --rm \
   --user "$(id -u):$(id -g)" \
   -v "${LOCAL_ROOT}:/workspace" \
+  -v "${LOCAL_ROOT}/../cycore:/workspace/cycore:ro" \
   -w /workspace/cpp \
   ${COMPILER_IMAGE} \
-  bash -lc "./build/bin/cycore_fft_plugin"
+  bash -lc "TEST_FAILED=0; for f in build/bin/qa_*; do if [ -x \"\$f\" ]; then echo \"================ Running \$f ================\"; \"\$f\" || TEST_FAILED=1; fi; done; exit \$TEST_FAILED"
 TEST_STATUS=$?
 set -e
 

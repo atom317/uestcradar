@@ -65,7 +65,7 @@ LFMSource::LFMSource(const cy::flowgraph::ValueMap& params)
         throw std::invalid_argument(
             "LFMSource batch_size must be a positive multiple of num_channels");
     }
-    if (sample_rate_ <= 0.0 || amplitude_ < 0.0 || amplitude_ > 32767.0) {
+    if (sample_rate_ <= 0.0 || amplitude_ < 0.0 || amplitude_ > 8191.0) {
         throw std::invalid_argument("LFMSource waveform parameters are out of range");
     }
     if (samples_per_pulse_ >
@@ -163,22 +163,22 @@ void LFMSource::on_start() {
                  batch_size_ / num_channels_, waveform_template_.size());
 }
 
-void LFMSource::process_work() {
+bool LFMSource::process_work() {
     ++process_work_calls_;
     std::size_t available = out.available();
     if (available == 0) {
-        return;
+        return false;
     }
 
     std::size_t batch = std::min(available, batch_size_);
     batch -= batch % num_channels_;
     if (batch == 0) {
-        return;
+        return false;
     }
 
     auto span = out.reserve(batch);
     if (span.empty()) {
-        return;
+        return false;
     }
 
     if (!batch_template_.empty() && template_offset_ == 0 && span.size() == batch_template_.size()) {
@@ -234,6 +234,7 @@ void LFMSource::process_work() {
                      "[TXTRACE][LFM] first_template_repeated waveform=%s template_elements=%zu continuous=1\n",
                      waveform_type_.c_str(), waveform_template_.size());
     }
+    return true;
 }
 
 } // namespace cy::flowgraph::blocks::common

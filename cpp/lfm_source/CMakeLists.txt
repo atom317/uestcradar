@@ -5,10 +5,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 🟢 强指向主项目 cycore 最新的 SDK 头文件以保证 ABIv2 对齐
-if(EXISTS "/home/zikun/workspace/cycore")
-    set(CYCORE_ROOT "/home/zikun/workspace/cycore")
-else()
+if(EXISTS "/workspace/cycore")
+    set(CYCORE_ROOT "/workspace/cycore")
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../../cycore")
+    set(CYCORE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../cycore")
+elseif(EXISTS "/home/zikun/code/common/cycore")
     set(CYCORE_ROOT "/home/zikun/code/common/cycore")
+else()
+    set(CYCORE_ROOT "/home/zikun/workspace/cycore")
 endif()
 
 include_directories(${CYCORE_ROOT}/lib/du/flowgraph/core/include)

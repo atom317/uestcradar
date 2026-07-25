@@ -656,15 +656,16 @@ public:
     explicit AlgorithmBlockAdapter(const cy::flowgraph::ValueMap& params)
         : algorithm_(std::make_unique<Algorithm>(Params(params))) {}
 
-    void process_work() {
+    bool process_work() {
         Reader<Tin> sdk_reader(in);
         Writer<Tout> sdk_writer(out);
         const bool ok = algorithm_->work(sdk_reader, sdk_writer);
         if (!ok) {
-            return;
+            return false;
         }
         sdk_writer.commit();
         sdk_reader.consume();
+        return true;
     }
 
 private:

@@ -20,7 +20,7 @@ public:
     LFMSource();
     explicit LFMSource(const cy::flowgraph::ValueMap& params);
     void on_start();
-    void process_work();
+    bool process_work();
 
     std::size_t num_channels() const noexcept { return num_channels_; }
     std::size_t total_elements() const noexcept { return pulse_elements_; }

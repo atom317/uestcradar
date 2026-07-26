@@ -1,222 +1,237 @@
 #include "range_doppler_algorithm.h"
 
+#include <block_test_harness.h>
 #include <cycore_algorithm_sdk.h>
-#include <flowgraph/block.h>
-#include <flowgraph/port.h>
-#include <flowgraph/graph.h>
+#include <flowgraph/block_wrapper.h>
+#include <flowgraph/value.h>
 
-#include <cassert>
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <iostream>
+#include <memory>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace fg = cy::flowgraph;
-using InputSample = cycore::algorithm::range_doppler::InputSample;
-using OutputSample = cycore::algorithm::range_doppler::OutputSample;
+namespace sdk = cycore::sdk;
+namespace test_support = cycore::sdk::test;
+namespace data = cycore::algorithm::range_doppler;
 
-struct TestCase {
-    std::string name;
-    std::size_t channel_count = 2;
-    std::size_t pulses = 8;
-    std::size_t samples_per_pulse = 8;
-    double range_bin = 2.0;
-    double doppler_bin = 0.0;
-    double amplitude = 1000.0;
-    bool is_nyquist = false;
-    bool is_non_integer = false;
-    bool is_multi_channel = false;
+namespace {
+
+using InputSample = data::InputSample;
+using OutputSample = data::OutputSample;
+using ProductionBlock =
+    sdk::AlgorithmBlockAdapter<RangeDopplerAlgorithm, InputSample, OutputSample>;
+using Harness = test_support::BlockTestHarness<InputSample, OutputSample>;
+
+struct Dimensions {
+    std::size_t channels;
+    std::size_t pulses;
+    std::size_t samples;
+
+    std::size_t input_elements() const { return channels * pulses * samples; }
+    std::size_t output_elements() const { return pulses * samples; }
 };
 
-struct SimSource : public fg::Block<SimSource> {
-    fg::PortOut<InputSample> out;
-    CY_MAKE_REFLECTABLE(SimSource, out);
-
-    TestCase tc;
-    bool done = false;
-
-    bool process_work() {
-        if (done) return false;
-        std::size_t count = tc.channel_count * tc.pulses * tc.samples_per_pulse;
-        auto span = out.reserve(count);
-        if (span.empty()) return false;
-
-        const double pi = 3.14159265358979323846;
-        for (std::size_t p = 0; p < tc.pulses; ++p) {
-            for (std::size_t s = 0; s < tc.samples_per_pulse; ++s) {
-                for (std::size_t ch = 0; ch < tc.channel_count; ++ch) {
-                    double r_bin = tc.range_bin;
-                    double d_bin = tc.doppler_bin;
-                    if (tc.is_multi_channel && ch == 1) {
-                        d_bin = -2.0;
-                    }
-
-                    double phase = 2.0 * pi * (
-                        r_bin * static_cast<double>(s) / static_cast<double>(tc.samples_per_pulse) +
-                        d_bin * static_cast<double>(p) / static_cast<double>(tc.pulses)
-                    );
-                    
-                    double val_re = tc.amplitude * std::cos(phase);
-                    double val_im = tc.amplitude * std::sin(phase);
-
-                    if (tc.is_nyquist) {
-                        val_re = (p % 2 == 0) ? tc.amplitude : -tc.amplitude;
-                        val_im = 0;
-                    }
-
-                    std::size_t idx = ((p * tc.samples_per_pulse + s) * tc.channel_count) + ch;
-                    span[idx] = InputSample{
-                        static_cast<std::int16_t>(std::round(val_re)),
-                        static_cast<std::int16_t>(std::round(val_im))
-                    };
-                }
-            }
-        }
-        span.commit(count);
-        done = true;
-        return true;
+void Require(bool condition, const std::string& message) {
+    if (!condition) {
+        throw std::runtime_error(message);
     }
-};
-
-struct SimSink : public fg::Block<SimSink> {
-    fg::PortIn<OutputSample> in;
-    CY_MAKE_REFLECTABLE(SimSink, in);
-
-    TestCase tc;
-    bool done = false;
-
-    bool process_work() {
-        if (done) return false;
-        std::size_t count = tc.channel_count * tc.pulses * tc.samples_per_pulse;
-        auto span = in.get(count);
-        if (span.size() < count) return false;
-
-        double expected_peak = 20.0 * std::log10(tc.amplitude * std::sqrt(static_cast<double>(tc.pulses)));
-        const double epsilon = 0.5;
-
-        cycore::sdk::CubeView<const OutputSample> cube(span.data(), tc.channel_count, tc.pulses, tc.samples_per_pulse);
-
-        for (std::size_t ch = 0; ch < tc.channel_count; ++ch) {
-            double expected_d_bin = tc.doppler_bin;
-            if (tc.is_multi_channel && ch == 1) {
-                expected_d_bin = -2.0;
-            }
-
-            int N = tc.pulses;
-            int k_unsh = static_cast<int>(std::round(expected_d_bin));
-            if (k_unsh < 0) k_unsh += N;
-            if (tc.is_nyquist) {
-                k_unsh = N / 2;
-            }
-            int k_expected = (k_unsh + N / 2) % N;
-
-            for (std::size_t p = 0; p < tc.pulses; ++p) {
-                for (std::size_t s = 0; s < tc.samples_per_pulse; ++s) {
-                    std::size_t idx = ((p * tc.samples_per_pulse + s) * tc.channel_count) + ch;
-                    double actual_val = span[idx];
-
-                    // Verify Output Layout
-                    if (std::abs(cube(ch, p, s) - actual_val) > 1e-6) {
-                        std::cerr << "Layout Assert Failed: cube(ch, p, s) != span[idx]" << std::endl;
-                        assert(false);
-                    }
-
-                    if (tc.is_non_integer) {
-                        // Leakage test: skip strict checks for non-integer bins
-                    } else if (p == static_cast<std::size_t>(k_expected)) {
-                        // 正确的多普勒 bin：在目标 range_bin 检查峰值精度
-                        if (s == static_cast<std::size_t>(tc.range_bin)) {
-                            if (std::abs(actual_val - expected_peak) >= epsilon) {
-                                std::cerr << "Peak Assert Failed in " << tc.name 
-                                          << " [ch=" << ch << " p=" << p << " s=" << s << "]"
-                                          << " Val=" << actual_val << " expected=" << expected_peak << std::endl;
-                                assert(false);
-                            }
-                        }
-                        // 其他 sample 上同一多普勒 bin 的能量不做旁瓣断言
-                        // （因为 RD 只对多普勒维做 FFT，距离维度能量取决于输入）
-                    } else {
-                        // 非目标多普勒 bin：检查多普勒维旁瓣抑制
-                        // 仅在目标 range_bin sample 上检查，其他 sample 不强制
-                        if (s == static_cast<std::size_t>(tc.range_bin)) {
-                            if (actual_val > expected_peak - 10.0) {
-                                std::cerr << "Doppler Leakage Assert Failed in " << tc.name 
-                                          << " [ch=" << ch << " p=" << p << " s=" << s << "]"
-                                          << " Val=" << actual_val << " expected below " << (expected_peak - 10.0) << std::endl;
-                                assert(false);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        std::cout << "[Assert Pass] " << tc.name << std::endl;
-        span.consume(count);
-        done = true;
-        return true;
-    }
-};
-
-extern template class cycore::sdk::AlgorithmBlockAdapter<RangeDopplerAlgorithm, InputSample, OutputSample>;
-
-void run_test(const TestCase& tc) {
-    fg::Graph graph;
-
-    fg::ValueMap params;
-    params["num_channels"] = static_cast<std::int64_t>(tc.channel_count);
-    params["num_pulses"] = static_cast<std::int64_t>(tc.pulses);
-    params["samples_per_pulse"] = static_cast<std::int64_t>(tc.samples_per_pulse);
-
-    auto& source = graph.emplace<SimSource>("source");
-    source.tc = tc;
-
-    auto& rd_block = graph.emplace<cycore::sdk::AlgorithmBlockAdapter<RangeDopplerAlgorithm, InputSample, OutputSample>>("range_doppler", params);
-
-    auto& sink = graph.emplace<SimSink>("sink");
-    sink.tc = tc;
-
-    graph.connect(source, "out", rd_block, "in", fg::EdgeOptions{4096});
-    graph.connect(rd_block, "out", sink, "in", fg::EdgeOptions{4096});
-
-    graph.init();
-    graph.start();
-    graph.work_once();
-    graph.stop();
 }
 
+fg::ValueMap MakeParams(const Dimensions& dimensions) {
+    fg::ValueMap params;
+    params["num_channels"] = static_cast<std::int64_t>(dimensions.channels);
+    params["num_pulses"] = static_cast<std::int64_t>(dimensions.pulses);
+    params["samples_per_pulse"] = static_cast<std::int64_t>(dimensions.samples);
+    return params;
+}
+
+std::unique_ptr<fg::BlockModel> MakeBlock(const Dimensions& dimensions) {
+    return std::unique_ptr<fg::BlockModel>(
+        new fg::BlockWrapper<ProductionBlock>(
+            "range_doppler_test", fg::BlockTypeName{"algorithm.range_doppler"},
+            MakeParams(dimensions)));
+}
+
+std::size_t InputIndex(const Dimensions& dimensions,
+                       std::size_t channel,
+                       std::size_t pulse,
+                       std::size_t sample) {
+    return ((pulse * dimensions.samples + sample) * dimensions.channels) + channel;
+}
+
+std::size_t OutputIndex(const Dimensions& dimensions,
+                        std::size_t doppler_bin,
+                        std::size_t sample) {
+    return doppler_bin * dimensions.samples + sample;
+}
+
+std::vector<InputSample> MakeTone(const Dimensions& dimensions,
+                                  std::size_t range_bin,
+                                  int doppler_bin,
+                                  std::int16_t amplitude,
+                                  bool excite_other_channels) {
+    std::vector<InputSample> input(dimensions.input_elements(), InputSample{0, 0});
+    constexpr double kPi = 3.14159265358979323846;
+    for (std::size_t pulse = 0; pulse < dimensions.pulses; ++pulse) {
+        const double phase = 2.0 * kPi * static_cast<double>(doppler_bin) *
+                             static_cast<double>(pulse) /
+                             static_cast<double>(dimensions.pulses);
+        input[InputIndex(dimensions, 0, pulse, range_bin)] = InputSample{
+            static_cast<std::int16_t>(std::lround(amplitude * std::cos(phase))),
+            static_cast<std::int16_t>(std::lround(amplitude * std::sin(phase)))};
+        if (excite_other_channels) {
+            for (std::size_t channel = 1; channel < dimensions.channels; ++channel) {
+                input[InputIndex(dimensions, channel, pulse, range_bin)] = InputSample{
+                    static_cast<std::int16_t>((pulse & 1U) ? -12000 : 12000),
+                    static_cast<std::int16_t>((channel & 1U) ? 7000 : -7000)};
+            }
+        }
+    }
+    return input;
+}
+
+std::vector<OutputSample> RunFrame(const Dimensions& dimensions,
+                                   const std::vector<InputSample>& input) {
+    Harness harness(MakeBlock(dimensions), dimensions.input_elements(),
+                    dimensions.output_elements(), dimensions.input_elements() * 2,
+                    dimensions.output_elements() * 2);
+    harness.publish(input);
+    const auto observation = harness.work_once();
+    Require(observation.succeeded, "Range-Doppler complete transaction failed");
+    Require(observation.consumed_input_elements == dimensions.input_elements(),
+            "Range-Doppler consumed unexpected input count");
+    Require(observation.produced_output_elements == dimensions.output_elements(),
+            "Range-Doppler produced unexpected output count");
+    return harness.drain_one_transaction();
+}
+
+void VerifyTone(const Dimensions& dimensions,
+                std::size_t range_bin,
+                int doppler_bin,
+                std::int16_t amplitude) {
+    const auto output = RunFrame(
+        dimensions, MakeTone(dimensions, range_bin, doppler_bin, amplitude, false));
+    int unshifted = doppler_bin;
+    if (unshifted < 0) {
+        unshifted += static_cast<int>(dimensions.pulses);
+    }
+    const std::size_t shifted =
+        static_cast<std::size_t>((unshifted + dimensions.pulses / 2) % dimensions.pulses);
+    const double expected_db = 10.0 * std::log10(
+        static_cast<double>(dimensions.pulses) * amplitude * amplitude);
+
+    std::size_t measured_peak = 0;
+    for (std::size_t bin = 1; bin < dimensions.pulses; ++bin) {
+        if (output[OutputIndex(dimensions, bin, range_bin)] >
+            output[OutputIndex(dimensions, measured_peak, range_bin)]) {
+            measured_peak = bin;
+        }
+    }
+    Require(measured_peak == shifted, "fftshift frequency-bin alignment mismatch");
+    Require(std::abs(output[OutputIndex(dimensions, shifted, range_bin)] - expected_db) < 0.25,
+            "coherent FFT gain/dB conversion mismatch");
+    for (std::size_t bin = 0; bin < dimensions.pulses; ++bin) {
+        if (bin != shifted) {
+            Require(output[OutputIndex(dimensions, bin, range_bin)] < expected_db - 20.0,
+                    "integer Doppler tone leaked excessively into another bin");
+        }
+    }
+}
+
+void TestFrequencyAndFftShift() {
+    const Dimensions dimensions{2, 8, 16};
+    VerifyTone(dimensions, 5, 0, 1000);       // DC must land at P / 2.
+    VerifyTone(dimensions, 5, 3, 1000);
+    VerifyTone(dimensions, 5, -2, 1000);
+    VerifyTone(dimensions, 5, 4, 1000);       // Nyquist.
+}
+
+void TestCurrentSingleOutputChannelContract() {
+    const Dimensions dimensions{3, 8, 16};
+    const auto reference = RunFrame(dimensions, MakeTone(dimensions, 4, 1, 900, false));
+    const auto with_other_channels =
+        RunFrame(dimensions, MakeTone(dimensions, 4, 1, 900, true));
+    Require(reference.size() == dimensions.output_elements(),
+            "Range-Doppler output must contain one channel only");
+    for (std::size_t i = 0; i < reference.size(); ++i) {
+        Require(std::abs(reference[i] - with_other_channels[i]) < 1.0e-5f,
+                "non-zero input channel changed channel-0-only RD output");
+    }
+}
+
+void TestInputShortageAndOutputBackpressure() {
+    const Dimensions dimensions{2, 8, 16};
+    const auto frame = MakeTone(dimensions, 2, 1, 1000, false);
+
+    {
+        Harness harness(MakeBlock(dimensions), dimensions.input_elements(),
+                        dimensions.output_elements(), dimensions.input_elements() * 2,
+                        dimensions.output_elements() * 2);
+        harness.publish(frame.data(), frame.size() - 1);
+        const auto observation = harness.work_once();
+        Require(!observation.succeeded && observation.consumed_input_elements == 0 &&
+                    observation.produced_output_elements == 0,
+                "insufficient RD input must roll back the whole transaction");
+    }
+    {
+        Harness harness(MakeBlock(dimensions), dimensions.input_elements(),
+                        dimensions.output_elements(), dimensions.input_elements() * 2,
+                        dimensions.output_elements() * 2);
+        harness.publish(frame);
+        Require(harness.work_once().succeeded, "first RD frame should fill output ring");
+        harness.publish(frame);
+        Require(harness.work_once().succeeded, "second RD frame should fill output ring");
+        harness.publish(frame);
+        const auto observation = harness.work_once();
+        Require(!observation.succeeded && observation.consumed_input_elements == 0 &&
+                    observation.produced_output_elements == 0,
+                "RD output backpressure must roll back the whole transaction");
+    }
+}
+
+void TestRingWrapAndParameterBoundary() {
+    const Dimensions dimensions{2, 8, 16};
+    Harness harness(MakeBlock(dimensions), dimensions.input_elements(),
+                    dimensions.output_elements(), dimensions.input_elements() * 2,
+                    dimensions.output_elements() * 2);
+    for (int bin = 0; bin < 6; ++bin) {
+        harness.publish(MakeTone(dimensions, 3, bin % 4, 700, false));
+        Require(harness.work_once().succeeded, "RD ring-wrap transaction failed");
+        Require(harness.drain_one_transaction().size() == dimensions.output_elements(),
+                "RD ring-wrap output size mismatch");
+    }
+
+    fg::ValueMap invalid = MakeParams(dimensions);
+    invalid["num_pulses"] = static_cast<std::int64_t>(6);
+    bool rejected = false;
+    try {
+        ProductionBlock invalid_block(invalid);
+        (void)invalid_block;
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    Require(rejected, "RD must reject non-power-of-two pulse counts");
+}
+
+} // namespace
+
 int main() {
-    // 1. DC (doppler_bin=0)
-    run_test({"1. DC (doppler_bin=0)", 1, 8, 8, 2.0, 0.0});
-
-    // 2. 正整 bin (doppler_bin=3)
-    run_test({"2. Pos Int Bin (doppler_bin=3)", 1, 8, 8, 2.0, 3.0});
-
-    // 3. 负整 bin (doppler_bin=-2)
-    run_test({"3. Neg Int Bin (doppler_bin=-2)", 1, 8, 8, 2.0, -2.0});
-
-    // 4. Nyquist (doppler_bin=N/2)
-    TestCase tc_nyquist = {"4. Nyquist (doppler_bin=N/2)", 1, 8, 8, 2.0, 0.0, 1000.0, true};
-    run_test(tc_nyquist);
-
-    // 5. 非整 bin (doppler_bin=1.5)
-    TestCase tc_leakage = {"5. Non-int Bin Leakage (doppler_bin=1.5)", 1, 8, 8, 2.0, 1.5, 1000.0, false, true};
-    run_test(tc_leakage);
-
-    // 6. 距离维度 (range_bin=2, others 0) -> Already tested inherently by checking range_bin
-    run_test({"6. Range Dimension Isolation", 1, 8, 8, 3.0, 1.0});
-
-    // 7. 多通道 (ch0: bin=1, ch1: bin=-2)
-    TestCase tc_multi = {"7. Multi-channel Independence", 2, 8, 8, 2.0, 1.0, 1000.0, false, false, true};
-    run_test(tc_multi);
-
-    // 8. 输出布局验证 -> Verified in SimSink loop using CubeView operator()
-    run_test({"8. Output Layout CubeView vs Raw", 2, 8, 8, 2.0, 1.0});
-
-    // 9. 峰值 dB 精度 -> Checked via epsilon=0.5 in expected_peak calculation
-    run_test({"9. Peak dB Accuracy (A=1000, N=8 -> 69.03dB)", 1, 8, 8, 2.0, 0.0});
-
-    std::cout << "All Range-Doppler deterministic tests passed successfully!" << std::endl;
-    return 0;
+    try {
+        TestFrequencyAndFftShift();
+        TestCurrentSingleOutputChannelContract();
+        TestInputShortageAndOutputBackpressure();
+        TestRingWrapAndParameterBoundary();
+        std::cout << "qa_range_doppler_block passed\n";
+        return 0;
+    } catch (const std::exception& ex) {
+        std::cerr << "qa_range_doppler_block failed: " << ex.what() << '\n';
+        return 1;
+    }
 }

@@ -16,11 +16,10 @@ algorithm_template/
 │   ├── algorithm.cpp           # 算法实现
 │   └── algorithm_block.cpp     # 插件注册和导出
 ├── test/
-│   ├── block_test_harness.h    # 通用测试工具
 │   ├── qa_algorithm_block.cpp  # 正确性测试
 │   ├── qa_plugin_load.cpp      # 真实 .so 加载测试
 │   └── bm_algorithm_block.cpp  # 性能测试
-└── sdk/include/                # 只读 SDK 头文件
+└── sdk/include/                # SDK 头文件；复用公共 block_test_harness.h
 ```
 
 | 文件 | 是否修改 |
@@ -33,8 +32,9 @@ algorithm_template/
 | `test/qa_plugin_load.cpp` | 修改：真实 `.so` 加载测试数据 |
 | `test/bm_algorithm_block.cpp` | 修改：性能测试配置 |
 | `CMakeLists.txt` | 通常不改；新增依赖或修改插件目标名时才改 |
-| `test/block_test_harness.h`、`Dockerfile.build_cross` | 通常不改 |
-| `sdk/include/**` | 禁止修改 |
+| `Dockerfile.build_cross` | 通常不改 |
+| `cpp/sdk/include/block_test_harness.h` | 公共测试基础设施；算子不复制或修改 |
+| `sdk/include/**` | 禁止修改；公共 Harness 位于仓库 `cpp/sdk/include` |
 
 同时禁止修改算法构造函数、`work()` 生产接口、插件导出符号、接口版本和注册方式，也
 不要为测试创建另一套算法入口。

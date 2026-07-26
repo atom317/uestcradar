@@ -1,5 +1,5 @@
 #include "algorithm.h"
-#include "block_test_harness.h"
+#include <block_test_harness.h>
 #include "data.h"
 
 #include <cycore_algorithm_sdk.h>
@@ -24,7 +24,7 @@
 namespace fg = cy::flowgraph;
 namespace sdk = cycore::sdk;
 namespace data = cycore::algorithm::my_block;
-namespace test_support = algorithm_template::test;
+namespace test_support = cycore::sdk::test;
 
 namespace {
 

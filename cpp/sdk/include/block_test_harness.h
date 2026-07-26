@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-namespace algorithm_template::test {
+namespace cycore::sdk::test {
 
 struct WorkObservation {
     bool succeeded = false;
@@ -22,6 +22,9 @@ struct WorkObservation {
     std::chrono::nanoseconds latency{0};
 };
 
+// Test-only saddle around one production BlockModel.  It deliberately knows
+// only the fixed N-to-M transaction contract, never algorithm Params or data
+// shape semantics such as Matrix/Cube dimensions.
 template <typename InputSample, typename OutputSample>
 class BlockTestHarness {
     static_assert(std::is_trivially_copyable<InputSample>::value,
@@ -43,14 +46,14 @@ public:
         }
         if (input_elements_per_work_ == 0 || output_elements_per_work_ == 0) {
             throw std::invalid_argument(
-                "BlockTestHarness v1 requires positive fixed input and output transaction sizes");
+                "BlockTestHarness requires positive fixed input/output transaction sizes");
         }
         if (input_capacity == 0 || output_capacity == 0) {
             throw std::invalid_argument("Ring buffer capacities must be positive");
         }
         if (block_->input_ports().size() != 1 || block_->output_ports().size() != 1) {
             throw std::invalid_argument(
-                "BlockTestHarness v1 supports exactly one input and one output port");
+                "BlockTestHarness supports exactly one input and one output port");
         }
 
         input_port_ = block_->input_ports().front();
@@ -73,21 +76,18 @@ public:
             try {
                 block_->stop();
             } catch (...) {
-                // Test cleanup must not mask the original failure.
+                // Do not mask a test failure during cleanup.
             }
         }
     }
 
     void publish(const InputSample* data, std::size_t count) {
-        if (count == 0) {
-            throw std::invalid_argument("Cannot publish an empty input");
-        }
-        if (!data) {
-            throw std::invalid_argument("Input data pointer must not be null");
+        if (!data || count == 0) {
+            throw std::invalid_argument("publish requires non-empty input data");
         }
         auto span = source_.reserve(count);
         if (span.size() != count) {
-            throw std::runtime_error("Input ring could not reserve one contiguous publication");
+            throw std::runtime_error("input ring cannot reserve one publication");
         }
         std::copy(data, data + count, span.data());
         span.commit(count);
@@ -100,7 +100,6 @@ public:
     WorkObservation work_once() {
         const std::size_t input_before = input_available();
         const std::size_t output_before = output_available();
-
         const auto begin = std::chrono::steady_clock::now();
         block_->work();
         const auto end = std::chrono::steady_clock::now();
@@ -108,7 +107,7 @@ public:
         const std::size_t input_after = input_available();
         const std::size_t output_after = output_available();
         if (input_after > input_before || output_after < output_before) {
-            throw std::runtime_error("Block changed port availability in an unsupported direction");
+            throw std::runtime_error("Block changed port availability in an invalid direction");
         }
 
         WorkObservation observation;
@@ -132,15 +131,12 @@ public:
     }
 
     std::vector<OutputSample> drain(std::size_t count) {
-        if (count == 0) {
-            throw std::invalid_argument("Cannot drain an empty output");
-        }
-        if (sink_.available() < count) {
-            throw std::runtime_error("Output ring does not contain the requested element count");
+        if (count == 0 || sink_.available() < count) {
+            throw std::runtime_error("requested output transaction is unavailable");
         }
         auto span = sink_.get(count);
         if (span.size() != count) {
-            throw std::runtime_error("Output ring could not expose one contiguous transaction");
+            throw std::runtime_error("output ring cannot expose one transaction");
         }
         std::vector<OutputSample> result(span.data(), span.data() + span.size());
         span.consume(span.size());
@@ -151,21 +147,10 @@ public:
         return drain(output_elements_per_work_);
     }
 
-    std::size_t input_available() const {
-        return input_port_->dynamic_port().available();
-    }
-
-    std::size_t output_available() const {
-        return sink_.available();
-    }
-
-    std::size_t output_writable() const {
-        return output_port_->dynamic_port().available();
-    }
-
-    cy::flowgraph::BlockModel& block() noexcept {
-        return *block_;
-    }
+    std::size_t input_available() const { return input_port_->dynamic_port().available(); }
+    std::size_t output_available() const { return sink_.available(); }
+    std::size_t output_writable() const { return output_port_->dynamic_port().available(); }
+    cy::flowgraph::BlockModel& block() noexcept { return *block_; }
 
 private:
     template <typename Sample>
@@ -173,18 +158,14 @@ private:
                               cy::flowgraph::PortDirection expected_direction) {
         const auto dynamic = port.dynamic_port();
         if (dynamic.direction() != expected_direction ||
-            dynamic.port_type() != cy::flowgraph::PortType::STREAM) {
-            throw std::invalid_argument("Block port direction or kind does not match the harness");
-        }
-        if (dynamic.type_info() != std::type_index(typeid(Sample)) ||
+            dynamic.port_type() != cy::flowgraph::PortType::STREAM ||
+            dynamic.type_info() != std::type_index(typeid(Sample)) ||
             dynamic.item_size() != sizeof(Sample) ||
             dynamic.item_alignment() != alignof(Sample)) {
-            throw std::invalid_argument("Block port sample type does not match the harness");
+            throw std::invalid_argument("Block port does not match the harness sample contract");
         }
     }
 
-    // Declaration order keeps the connected reader/block alive until their
-    // corresponding writers are destroyed.
     cy::flowgraph::PortOut<InputSample> source_;
     std::unique_ptr<cy::flowgraph::BlockModel> block_;
     cy::flowgraph::PortIn<OutputSample> sink_;
@@ -195,4 +176,4 @@ private:
     bool started_ = false;
 };
 
-} // namespace algorithm_template::test
+} // namespace cycore::sdk::test

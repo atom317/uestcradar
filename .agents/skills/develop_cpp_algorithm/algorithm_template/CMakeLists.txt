@@ -23,6 +23,7 @@ set_target_properties(my_plugin PROPERTIES
 
 function(configure_algorithm_target target)
     target_include_directories(${target} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../../../cpp/sdk/include
         ${CMAKE_CURRENT_SOURCE_DIR}/sdk/include
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/test

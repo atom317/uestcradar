@@ -53,6 +53,16 @@ const char* NfftPolicy() {
 #endif
 }
 
+const char* ExecutionMode() {
+#if defined(PULSE_COMPRESSION_EXECUTION_OPENMP)
+    return "OPENMP";
+#elif defined(PULSE_COMPRESSION_EXECUTION_FFTW_THREADS)
+    return "FFTW_THREADS";
+#else
+    return "SINGLE";
+#endif
+}
+
 fg::ValueMap MakeParams(const Case& c) {
     fg::ValueMap params;
     params["num_channels"] = static_cast<std::int64_t>(c.channels);
@@ -143,6 +153,9 @@ void RunCase(const Case& c, std::size_t minimum_works, std::size_t warmup_works,
               << " nfft=" << nfft
               << " fft_batch=" << c.channels * c.pulses
               << " fft_work_bytes=" << nfft * c.channels * c.pulses * sizeof(float) * 2
+              << " execution_mode=" << ExecutionMode()
+              << " worker_threads=" << PULSE_COMPRESSION_WORKER_THREADS
+              << " chunk_size_config=" << PULSE_COMPRESSION_CHUNK_SIZE
               << '\n'
               << "  status=PASSED successful_works=" << successful_works
               << " failed_works=" << failed_works << '\n'
@@ -171,16 +184,23 @@ std::size_t ParsePositive(const char* text, const char* name) {
 int main(int argc, char** argv) {
     try {
         const std::size_t milliseconds = argc > 1 ? ParsePositive(argv[1], "measurement milliseconds") : 1000;
-        const std::size_t warmup = argc > 2 ? ParsePositive(argv[2], "warmup works") : 200;
-        const std::size_t minimum_works = argc > 3 ? ParsePositive(argv[3], "minimum measured works") : 1000;
+        const std::size_t warmup = argc > 2 ? ParsePositive(argv[2], "warmup works") : 20;
+        const std::size_t minimum_works = argc > 3 ? ParsePositive(argv[3], "minimum measured works") : 10;
+        const std::string case_filter = argc > 4 ? argv[4] : "";
         const std::vector<Case> cases{
             {"algorithm.pulse_compression/1x1x256", 1, 1, 256, std::nullopt},
             {"algorithm.pulse_compression/1x1x1024", 1, 1, 1024, std::nullopt},
             {"algorithm.pulse_compression/2x4x4096", 2, 4, 4096, std::nullopt},
+            {"algorithm.pulse_compression/8x4x4096", 8, 4, 4096, std::nullopt},
+            {"algorithm.pulse_compression/8x64x4096", 8, 64, 4096, 245.76},
         };
+        bool matched = false;
         for (const auto& c : cases) {
+            if (!case_filter.empty() && c.name.find(case_filter) == std::string::npos) continue;
+            matched = true;
             RunCase(c, minimum_works, warmup, static_cast<double>(milliseconds) / 1000.0);
         }
+        if (!matched) throw std::invalid_argument("benchmark case filter did not match any case");
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << "bm_pulse_compression_block failed: " << ex.what() << '\n';

@@ -18,6 +18,17 @@ std::mutex& PlannerMutex() {
     return mutex;
 }
 
+void EnsureFftwThreadsInitialized() {
+#if defined(PULSE_COMPRESSION_EXECUTION_FFTW_THREADS)
+    static std::once_flag initialized;
+    std::call_once(initialized, [] {
+        if (fftwf_init_threads() == 0) {
+            throw std::runtime_error("failed to initialize FFTW threads");
+        }
+    });
+#endif
+}
+
 bool IsSmooth2357(std::size_t value) {
     for (const std::size_t factor : {std::size_t{2}, std::size_t{3}, std::size_t{5},
                                      std::size_t{7}}) {
@@ -78,7 +89,8 @@ std::size_t SelectFftSize(std::size_t samples_per_pulse,
 }
 
 FftwBatchBackend::FftwBatchBackend(std::size_t samples_per_pulse,
-                                   std::size_t batch_count)
+                                   std::size_t batch_count,
+                                   std::size_t fftw_thread_count)
     : fft_size_(SelectFftSize(samples_per_pulse, 256)),
       batch_count_(batch_count),
       data_(nullptr),
@@ -104,16 +116,27 @@ FftwBatchBackend::FftwBatchBackend(std::size_t samples_per_pulse,
 
     int length = static_cast<int>(fft_size_);
     std::lock_guard<std::mutex> lock(PlannerMutex());
+    EnsureFftwThreadsInitialized();
+#if defined(PULSE_COMPRESSION_EXECUTION_FFTW_THREADS)
+    fftwf_plan_with_nthreads(static_cast<int>(fftw_thread_count));
+#else
+    (void)fftw_thread_count;
+#endif
+#if defined(PULSE_COMPRESSION_FFTW_PLAN_MEASURE)
+    constexpr unsigned kPlanFlags = FFTW_MEASURE;
+#else
+    constexpr unsigned kPlanFlags = FFTW_ESTIMATE;
+#endif
     forward_plan_ = fftwf_plan_many_dft(
         1, &length, static_cast<int>(batch_count_),
         reinterpret_cast<fftwf_complex*>(data_), nullptr, 1, static_cast<int>(fft_size_),
         reinterpret_cast<fftwf_complex*>(data_), nullptr, 1, static_cast<int>(fft_size_),
-        FFTW_FORWARD, FFTW_ESTIMATE);
+        FFTW_FORWARD, kPlanFlags);
     inverse_plan_ = fftwf_plan_many_dft(
         1, &length, static_cast<int>(batch_count_),
         reinterpret_cast<fftwf_complex*>(data_), nullptr, 1, static_cast<int>(fft_size_),
         reinterpret_cast<fftwf_complex*>(data_), nullptr, 1, static_cast<int>(fft_size_),
-        FFTW_BACKWARD, FFTW_ESTIMATE);
+        FFTW_BACKWARD, kPlanFlags);
     if (forward_plan_ == nullptr || inverse_plan_ == nullptr) {
         if (forward_plan_ != nullptr) fftwf_destroy_plan(AsPlan(forward_plan_));
         if (inverse_plan_ != nullptr) fftwf_destroy_plan(AsPlan(inverse_plan_));

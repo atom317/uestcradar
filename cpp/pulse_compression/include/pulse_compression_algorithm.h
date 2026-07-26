@@ -10,7 +10,7 @@
 #include <string>
 
 namespace pulse_compression_detail {
-class FftwBatchBackend;
+class PulseCompressionImplementation;
 }
 
 namespace pulse_compression_data = cycore::algorithm::pulse_compression;
@@ -34,10 +34,9 @@ private:
     static std::size_t ReadSizeParam(const cycore::sdk::Params& params,
                                      const std::string& key,
                                      std::size_t fallback);
-    static std::int16_t ClampS16(float value);
 
     std::size_t num_channels_;
     std::size_t num_pulses_;
     std::size_t samples_per_pulse_;
-    std::unique_ptr<pulse_compression_detail::FftwBatchBackend> fft_;
+    std::unique_ptr<pulse_compression_detail::PulseCompressionImplementation> implementation_;
 };

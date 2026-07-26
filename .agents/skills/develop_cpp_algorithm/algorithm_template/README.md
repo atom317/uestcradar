@@ -34,6 +34,7 @@ algorithm_template/
 | `CMakeLists.txt` | 通常不改；新增依赖或修改插件目标名时才改 |
 | `Dockerfile.build_cross` | 通常不改 |
 | `cpp/sdk/include/block_test_harness.h` | 公共测试基础设施；算子不复制或修改 |
+| `cpp/sdk/include/block_benchmark_runner.h` | 公共 Benchmark Runner；算子不复制或修改 |
 | `sdk/include/**` | 禁止修改；公共 Harness 位于仓库 `cpp/sdk/include` |
 
 同时禁止修改算法构造函数、`work()` 生产接口、插件导出符号、接口版本和注册方式，也
@@ -178,9 +179,35 @@ ctest --test-dir build-test --output-on-failure
 
 ## 性能测试
 
-在 `test/bm_algorithm_block.cpp` 中填写真实 `Params`、输入/输出类型、每次输入元素数
-`N`、输出元素数 `M`、缓冲容量和一帧预生成输入。可选填写目标输入速率
-`Mitems/s`。支持多个运行尺寸时，在该文件中增加多个 case。
+在 `test/bm_algorithm_block.cpp` 中，Benchmark 开发流程缩减为三步，算法开发者只修改 `MakeBenchmarkCases()`。公共 Runner 自动创建生产 BlockModel、连接 Harness、生成 Ring Buffer 容量、预热、计时、验证 N-to-M 事务、统计并打印结果。
+
+### 第一步：写 Params
+
+填写创建生产 Block 所需的 ValueMap，参数名称必须与算法构造函数一致。
+
+### 第二步：填写 N/M
+
+* `N` = 一次成功 `work()` 完整消费的输入元素数；
+* `M` = 一次成功 `work()` 完整提交的输出元素数；
+
+明确允许 `N != M`，不得根据 Matrix/Cube 名称推导，必须根据生产算法真实 Reader/Writer 契约填写。
+
+### 第三步：必要时覆盖输入帧
+
+默认不填写，Runner 自动使用：
+
+```cpp
+std::vector<InputSample>(N, InputSample{})
+```
+
+只有确实需要特定输入分布时才覆盖，并保证元素数严格等于 `N`。
+
+### 规则与约束说明
+
+* **数据类型约束**：`InputSample` 必须可默认构造且可平凡复制。
+* **容量自动生成**：Ring Buffer 容量由 Runner 自动计算与分配，不属于开发步骤。
+* **实时余量**：目标输入速率 `target_input_mitems_per_second` 为可选参数，只用于计算实时余量（Realtime Headroom）。
+* **开发红线**：严禁修改 Runner、Harness、计时循环、事务校验、指标公式和打印主体。
 
 前期可在本机运行 Release Benchmark：
 
@@ -198,14 +225,13 @@ cmake --build build-benchmark -j"$(nproc)"
 ./build-cross/bm_algorithm_block
 ```
 
-需要更长测试时可传入最短测量毫秒数、预热次数和最少正式调用次数：
+需要更长测试时可传入最短测量毫秒数、预热次数和最少正式调用次数；第四个可选参数按 case 名称过滤：
 
 ```bash
-./build-cross/bm_algorithm_block 3000 500 1000
+./build-cross/bm_algorithm_block 3000 500 1000 [case_filter]
 ```
 
-结果包含成功/失败调用数、延迟、输入/输出吞吐和带宽，表示当前目标机上完整算法
-Block 的饱和处理上限，不代表设备、网络、磁盘或整套系统性能。
+结果包含成功/失败调用数、延迟、输入/输出吞吐和带宽，表示当前目标机上完整算法 Block 的饱和处理上限，不代表设备、网络、磁盘或整套系统性能。
 
 ## 交付产物
 

@@ -7,18 +7,49 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(BUILD_TESTING "Build algorithm QA and plugin-load tests" OFF)
 option(BUILD_BENCHMARKS "Build algorithm throughput benchmarks" OFF)
+set(PULSE_COMPRESSION_NFFT_MODE "FAST" CACHE STRING
+    "FFTW NFFT policy: FAST, POW2, or EXPLICIT")
+set_property(CACHE PULSE_COMPRESSION_NFFT_MODE PROPERTY STRINGS FAST POW2 EXPLICIT)
+set(PULSE_COMPRESSION_EXPLICIT_NFFT "0" CACHE STRING
+    "NFFT when PULSE_COMPRESSION_NFFT_MODE=EXPLICIT")
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(FFTW3F REQUIRED IMPORTED_TARGET fftw3f)
+
+set(PULSE_COMPRESSION_SOURCES
+    src/algorithm.cpp
+    src/pulse_compression_algorithm.cpp
+    src/pulse_compression_fft_backend_fftw.cpp
+)
 
 function(configure_pulse_compression_target target)
     target_include_directories(${target} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/../sdk/include
     )
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:-O3>)
     endif()
+    target_link_libraries(${target} PRIVATE PkgConfig::FFTW3F)
+
+    if(PULSE_COMPRESSION_NFFT_MODE STREQUAL "FAST")
+        target_compile_definitions(${target} PRIVATE PULSE_COMPRESSION_NFFT_MODE_FAST=1)
+    elseif(PULSE_COMPRESSION_NFFT_MODE STREQUAL "POW2")
+        target_compile_definitions(${target} PRIVATE PULSE_COMPRESSION_NFFT_MODE_POW2=1)
+    elseif(PULSE_COMPRESSION_NFFT_MODE STREQUAL "EXPLICIT")
+        if(PULSE_COMPRESSION_EXPLICIT_NFFT STREQUAL "0")
+            message(FATAL_ERROR "EXPLICIT NFFT mode requires PULSE_COMPRESSION_EXPLICIT_NFFT")
+        endif()
+        target_compile_definitions(${target} PRIVATE
+            PULSE_COMPRESSION_NFFT_MODE_EXPLICIT=1
+            PULSE_COMPRESSION_EXPLICIT_NFFT=${PULSE_COMPRESSION_EXPLICIT_NFFT})
+    else()
+        message(FATAL_ERROR "Unknown PULSE_COMPRESSION_NFFT_MODE: ${PULSE_COMPRESSION_NFFT_MODE}")
+    endif()
 endfunction()
 
-add_library(pulse_compression MODULE src/algorithm.cpp)
+add_library(pulse_compression MODULE ${PULSE_COMPRESSION_SOURCES})
 set_target_properties(pulse_compression PROPERTIES PREFIX "" SUFFIX ".so")
 configure_pulse_compression_target(pulse_compression)
 
@@ -26,7 +57,7 @@ if(BUILD_TESTING)
     enable_testing()
 
     add_executable(qa_pulse_compression_block
-        src/algorithm.cpp
+        ${PULSE_COMPRESSION_SOURCES}
         test/qa_pulse_compression_block.cpp
     )
     configure_pulse_compression_target(qa_pulse_compression_block)
@@ -42,7 +73,7 @@ if(BUILD_TESTING)
     )
 
     add_executable(qa_pulse_compression_peak
-        src/algorithm.cpp
+        ${PULSE_COMPRESSION_SOURCES}
         test/qa_pulse_compression_peak.cpp
     )
     configure_pulse_compression_target(qa_pulse_compression_peak)
@@ -50,7 +81,7 @@ endif()
 
 if(BUILD_BENCHMARKS)
     add_executable(bm_pulse_compression_block
-        src/algorithm.cpp
+        ${PULSE_COMPRESSION_SOURCES}
         test/bm_pulse_compression_block.cpp
     )
     configure_pulse_compression_target(bm_pulse_compression_block)

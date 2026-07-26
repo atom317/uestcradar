@@ -1,4 +1,5 @@
 #include "pulse_compression_algorithm.h"
+#include "pulse_compression_fft_backend.h"
 
 #include <block_test_harness.h>
 #include <cycore_algorithm_sdk.h>
@@ -42,6 +43,16 @@ struct Case {
 
 std::size_t Elements(const Case& c) { return c.channels * c.pulses * c.samples; }
 
+const char* NfftPolicy() {
+#if defined(PULSE_COMPRESSION_NFFT_MODE_POW2)
+    return "POW2";
+#elif defined(PULSE_COMPRESSION_NFFT_MODE_EXPLICIT)
+    return "EXPLICIT";
+#else
+    return "FAST";
+#endif
+}
+
 fg::ValueMap MakeParams(const Case& c) {
     fg::ValueMap params;
     params["num_channels"] = static_cast<std::int64_t>(c.channels);
@@ -78,6 +89,8 @@ void RunCase(const Case& c, std::size_t minimum_works, std::size_t warmup_works,
              double minimum_seconds) {
     const std::size_t n = Elements(c);
     const std::size_t m = n;
+    const std::size_t nfft =
+        pulse_compression_detail::SelectFftSize(c.samples, 256);
     Harness harness(MakeBlock(c), n, m, n * 2, m * 2);
     const auto input = MakeInput(c);
     for (std::size_t i = 0; i < warmup_works; ++i) {
@@ -126,6 +139,11 @@ void RunCase(const Case& c, std::size_t minimum_works, std::size_t warmup_works,
               << " output_elements_per_work=" << m
               << " input_bytes_per_work=" << n * sizeof(InputSample)
               << " output_bytes_per_work=" << m * sizeof(OutputSample) << '\n'
+              << "  fft_backend=FFTW3f nfft_policy=" << NfftPolicy()
+              << " nfft=" << nfft
+              << " fft_batch=" << c.channels * c.pulses
+              << " fft_work_bytes=" << nfft * c.channels * c.pulses * sizeof(float) * 2
+              << '\n'
               << "  status=PASSED successful_works=" << successful_works
               << " failed_works=" << failed_works << '\n'
               << "  input_Mitems/s=" << mitems << " output_Mitems/s=" << mitems << '\n'

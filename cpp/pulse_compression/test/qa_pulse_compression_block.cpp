@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace fg = cy::flowgraph;
@@ -199,7 +200,8 @@ void TestDelayEdgesAndChannelIsolation() {
     const auto actual = RunFrame(dimensions, input);
     const auto expected = ReferenceCompress(dimensions, input);
     for (std::size_t i = 0; i < actual.size(); ++i) {
-        Require(actual[i].i == expected[i].i && actual[i].q == expected[i].q,
+        Require(std::abs(static_cast<int>(actual[i].i) - expected[i].i) <= 1 &&
+                    std::abs(static_cast<int>(actual[i].q) - expected[i].q) <= 1,
                 "multi-channel pulse-compression reference mismatch");
     }
     for (std::size_t pulse = 0; pulse < dimensions.pulses; ++pulse) {
@@ -213,6 +215,35 @@ void TestDelayEdgesAndChannelIsolation() {
             }
             Require(peak == expected_delay, "channel/pulse matched-filter peak is not isolated");
         }
+    }
+}
+
+void TestReferenceAcrossFftSizes() {
+    const std::vector<std::pair<Dimensions, std::size_t>> cases{
+        {{1, 1, 256}, 0},
+        {{1, 1, 1024}, 384},
+        {{1, 1, 4096}, 3800},
+    };
+    for (const auto& test_case : cases) {
+        const auto& dimensions = test_case.first;
+        const auto input = MakeDelayedEchoes(dimensions, {test_case.second}, 3000);
+        const auto actual = RunFrame(dimensions, input);
+        const auto expected = ReferenceCompress(dimensions, input);
+        for (std::size_t i = 0; i < actual.size(); ++i) {
+            Require(std::abs(static_cast<int>(actual[i].i) - expected[i].i) <= 1 &&
+                        std::abs(static_cast<int>(actual[i].q) - expected[i].q) <= 1,
+                    "NFFT-dependent pulse-compression output differs from reference");
+        }
+        std::size_t peak = 0;
+        double peak_power = -1.0;
+        for (std::size_t sample = 0; sample < dimensions.samples; ++sample) {
+            const double power = MagnitudeSquared(actual[Index(dimensions, 0, 0, sample)]);
+            if (power > peak_power) {
+                peak_power = power;
+                peak = sample;
+            }
+        }
+        Require(peak == test_case.second, "NFFT-dependent peak position mismatch");
     }
 }
 
@@ -277,6 +308,7 @@ int main() {
     try {
         TestReferenceAccuracyPeakAndPslr();
         TestDelayEdgesAndChannelIsolation();
+        TestReferenceAcrossFftSizes();
         TestTransactionalBoundariesAndRingWrap();
         TestCurrentCs16ContractAndParameterBoundary();
         std::cout << "qa_pulse_compression_block passed\n";

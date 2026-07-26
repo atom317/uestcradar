@@ -1,203 +1,220 @@
-    rm -rf build && docker run --rm --user "$(id -u):$(id -g)" -v "$(pwd):/workspace" -w /workspace uestcradar-template-build bash -lc 
+# Cycore C++ 算法开发模板
 
-# Cycore 算法开发模板
+本模板用于开发 Cycore 算法插件。按“定义数据 → 实现算法 → 导出插件 → 编译 →
+正确性测试 → 性能测试 → 交付”的顺序操作即可。
 
-本模板基于 Cycore SDK 构建了一个算法开发模板。
-
-## 模板结构
+## 模板结构与修改范围
 
 ```text
 algorithm_template/
 ├── CMakeLists.txt
-├── include/data.h              # 示例数据类型与固定数据帧维度定义
-├── src/algorithm_block.cpp     # 算法具体实现
-└── sdk/include/                # 只读的 Cycore SDK 头文件
+├── Dockerfile.build_cross
+├── include/
+│   ├── data.h                  # 输入输出类型和每次处理的元素数
+│   └── algorithm.h             # 算法类声明
+├── src/
+│   ├── algorithm.cpp           # 算法实现
+│   └── algorithm_block.cpp     # 插件注册和导出
+├── test/
+│   ├── block_test_harness.h    # 通用测试工具
+│   ├── qa_algorithm_block.cpp  # 正确性测试
+│   ├── qa_plugin_load.cpp      # 真实 .so 加载测试
+│   └── bm_algorithm_block.cpp  # 性能测试
+└── sdk/include/                # 只读 SDK 头文件
 ```
+
+| 文件 | 是否修改 |
+| --- | --- |
+| `include/data.h` | 修改：输入输出类型和每次处理的元素数 |
+| `include/algorithm.h` | 修改：算法类声明 |
+| `src/algorithm.cpp` | 修改：算法实现 |
+| `src/algorithm_block.cpp` | 修改：插件标识和导出类型 |
+| `test/qa_algorithm_block.cpp` | 修改：正确性测试数据 |
+| `test/qa_plugin_load.cpp` | 修改：真实 `.so` 加载测试数据 |
+| `test/bm_algorithm_block.cpp` | 修改：性能测试配置 |
+| `CMakeLists.txt` | 通常不改；新增依赖或修改插件目标名时才改 |
+| `test/block_test_harness.h`、`Dockerfile.build_cross` | 通常不改 |
+| `sdk/include/**` | 禁止修改 |
+
+同时禁止修改算法构造函数、`work()` 生产接口、插件导出符号、接口版本和注册方式，也
+不要为测试创建另一套算法入口。
 
 ## 数据契约
 
-编辑 `include/data.h` 来声明流式数据类型与矩阵维度：
+在 `include/data.h` 中定义 `InputSample`、`OutputSample` 和每次 `work()` 的输入输出
+元素数。模板默认均为 `1 × 1024`：
 
 ```cpp
-namespace cycore::algorithm::my_block {
-
 using InputSample = float;
 using OutputSample = float;
 
-constexpr std::size_t kInputRows = 1;
-constexpr std::size_t kInputCols = 1024;
-constexpr std::size_t kOutputRows = 1;
-constexpr std::size_t kOutputCols = 1024;
-
-} // namespace cycore::algorithm::my_block
+constexpr std::size_t kInputElementsPerWork = 1024;
+constexpr std::size_t kOutputElementsPerWork = 1024;
 ```
 
-请仅使用 POD（平坦旧数据）/ 平凡可复制（Trivially-copyable）的样本数据类型。对于结构化的变长数据，请使用带 SDK RawBytes 辅助程序的 `std::byte` 端口，而不要在帧结构体中嵌入 `std::vector` 或 `std::string`。
+输入和输出可以类型不同、数量不同。样本类型必须可直接复制，可使用 `CS16`、`CF32`、
+`float`、`int16_t`、`int32_t`、`uint8_t` 或 `std::byte`。
 
-对于雷达数据立方体（Radar Cube），请将物理存储保持为一整个连续流，并使用 `read_cube(channels, pulses, samples_per_pulse)` / `reserve_cube(...)`。`CubeView` 采用样本主序、通道交织寻址方式，因此 `view(channel, pulse, sample)` 将映射至 `((pulse * samples_per_pulse + sample) * channels) + channel`。请将 `channels` 视为一个参数或契约常量，严禁在算法代码中硬编码 `16`。
+rows、cols、channels、pulses 等维度定义为算法常量或通过 `Params` 传入，不需要把
+Matrix、Cube 定义成外部测试类型。
 
 ## 算法开发规范
 
-开发算法需要将算法用一个类描述
+### 算法类
 
-### 模板类示例：
-
-必须包含
-
-1.构造函数
-
-2.工作函数
+`include/algorithm.h` 保留以下接口：
 
 ```cpp
 class MyAlgorithm {
 public:
-    // 1. 构造函数：负责提取参数并校验
-    explicit MyAlgorithm(const cycore::sdk::Params& params)
-        : factor_(params.get<double>("factor", 1.0)) {
-        if (factor_ < -1.0e9 || factor_ > 1.0e9) {
-            throw std::invalid_argument("factor is out of supported range");
-        }
-    }
+    explicit MyAlgorithm(const cycore::sdk::Params& params);
 
-    // 2. 工作函数：执行具体的信号处理逻辑
-    bool work(cycore::sdk::Reader<my_block_data::InputSample>& in,
-              cycore::sdk::Writer<my_block_data::OutputSample>& out);
-
-private:
-    double factor_ = 1.0; // 3. 私有常驻参数
+    bool work(
+        cycore::sdk::Reader<cycore::algorithm::my_block::InputSample>& in,
+        cycore::sdk::Writer<cycore::algorithm::my_block::OutputSample>& out);
 };
 ```
 
-### 工作函数
+构造函数在 `src/algorithm.cpp` 中读取并校验 `Params`。固定尺寸算法可以继续使用
+固定尺寸，不要求改成动态参数。
 
-算子在被流图调度拉起时，会循环触发 `work()` 函数。
+### work() 实现
 
-#### 工作函数示例代码：
+每次 `work()` 完成一帧处理：
 
-```cpp
-bool MyAlgorithm::work(cycore::sdk::Reader<my_block_data::InputSample>& in,
-                       cycore::sdk::Writer<my_block_data::OutputSample>& out) {
-  	// 1. 数据读取 (以 read_matrix 二维矩阵读取为例)
-    auto input = in.read_matrix(my_block_data::kInputRows, my_block_data::kInputCols);
-    if (!input) return false;
-  
-	// 2. 输出空间预留 (以 reserve_matrix 二维矩阵预留为例)
-    auto output = out.reserve_matrix(my_block_data::kOutputRows, my_block_data::kOutputCols);
-    if (!output) return false;
-  
-	// 3. 原地零拷贝算法计算与写入
-    for (std::size_t row = 0; row < input->rows(); ++row) {
-        for (std::size_t col = 0; col < input->cols(); ++col) {
-            (*output)(row, col) = (*input)(row, col) * static_cast<my_block_data::OutputSample>(factor_);
-        }
-    }
-    return true; // 成功返回 true，自动执行提交与消耗；失败返回 false 会发生指针回滚。
-}
-```
+1. 使用 Reader 读取输入。
+2. 使用 Writer 申请输出。
+3. 完成计算并写满输出。
+4. 成功返回 `true`；输入不足、输出空间不足或本帧失败时返回 `false`。
 
-编写具体的 `work` 逻辑时，可以用以下函数读取数据。
+Reader 可使用 `read()`、`read_available()`、`read_matrix()`、`read_cube()`；
+Writer 可使用 `reserve()`、`reserve_available()`、`reserve_matrix()`、
+`reserve_cube()`。`std::byte` 端口可使用 SDK RawBytes 接口。不要手动提交输出或
+消费输入。
 
-#### SDK 提供的读取与写入预留接口
+### 插件导出
 
-##### (1) 四种读取方法 (`cycore::sdk::Reader<T>`)
-
-* **`read(count)`**：物理读取指定长度（`count`）的数据切片（返回 `ArrayView`）。若缓冲区折返不连续，将抛出运行期异常；
-* **`read_available(max_count)`**：自适应读取当前最长可读的连续切片（不超过 `max_count`），绝对不会因缓冲区环形折返而报错；
-* **`read_matrix(rows, cols)`**：读取一个二维矩阵视图（`MatrixView`，元素数为 `rows * cols`），提供矩阵寻址支持；
-* **`read_cube(channels, pulses, samples_per_pulse)`**：读取一个三维数据立方体视图（`CubeView`），提供雷达数据交织快速索引。
-
-##### (2) 四种写入/预留方法 (`cycore::sdk::Writer<T>`)
-
-* **`reserve(count)`**：申请预留指定长度（`count`）的连续输出缓冲区（返回 `ArrayView`）。若剩余空间不足，将抛出异常；
-* **`reserve_available(max_count)`**：自适应申请当前最长可写的连续输出缓冲区，防止折返不连续而发生报错；
-* **`reserve_matrix(rows, cols)`**：申请预留一个二维矩阵视图（`MatrixView`），供您直接以矩阵索引方式写入数据；
-* **`reserve_cube(channels, pulses, samples_per_pulse)`**：申请预留一个三维雷达数据立方体视图（`CubeView`），供雷达数据流直接写入。
-
-### 算法导出与注册
-
-为了将编写的算法编译导出成动态库插件给 Cycore 流图框架正确使用，必须在顶层C++源文件的尾部使用 `CYCORE_EXPORT_ALGORITHM` 宏执行符号导出与注册：
+`src/algorithm_block.cpp` 只负责生产插件导出：
 
 ```cpp
 CYCORE_EXPORT_ALGORITHM(
-    "my_plugin",                               // 1. 导出动态库插件名称 (对应生成的 my_plugin.so 文件名，去除 .so 后缀)
-    "algorithm.my_block",                      // 2. 算子注册类型名称 (对应目标 YAML 拓扑配置文件中 blocks.type 字段)
-    MyAlgorithm,                               // 3. 实现该算法逻辑的具体 C++ 类名
-    cycore::algorithm::my_block::InputSample,  // 4. 输入通道样本的数据类型
-    cycore::algorithm::my_block::OutputSample  // 5. 输出通道样本的数据类型
+    "my_plugin",
+    "algorithm.my_block",
+    MyAlgorithm,
+    cycore::algorithm::my_block::InputSample,
+    cycore::algorithm::my_block::OutputSample
 )
 ```
 
-流图在拉起时会动态 `dlopen` 加载相应的插件并查找符号。若此处注册的“动态库插件名”或“注册类型名”与 YAML 拓扑配置不吻合，系统将报错中断。
+插件名、CMake 目标名、生成的 `.so` 文件名、Block key、部署配置和
+`test/qa_plugin_load.cpp` 必须一致。
 
-## 编译构建规范
+## 编译构建
 
-### 1.CMakelist规范
+### 本地开发编译
 
-为了让 C++ 算子代码成功被编译为能够被 Cycore 流图调度引擎动态加载的共享插件模块，必须在 [CMakeLists.txt](CMakeLists.txt) 中声明以下核心配置：
-
-#### (1)包含 SDK 依赖目录
-
-在编译路径中添加 SDK 头文件目录，从而让编译器能够正确解析插件注册头文件依赖：
-
-```cmake
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/sdk/include)
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
-```
-
-#### (2)将顶层源文件声明为插件库
-
-算子插件属于运行时动态加载模块，在 CMake 中必须声明为 **`MODULE`** 库，而非普通的共享链接库 `SHARED`：
-
-```cmake
-add_library(my_plugin MODULE
-    src/algorithm_block.cpp
-)
-```
-
-#### (3)去除默认 `lib` 前缀 (与 YAML 契约对齐)
-
-在 Linux 环境下，共享库默认会被 CMake 自动加上 `lib` 前缀（如 `libmy_plugin.so`）。我们必须强制通过以下 target 属性设置**将 `lib` 前缀擦除**，让其直接输出为 `my_plugin.so`，以确保其能与流图 YAML 配置文件中声明的 `plugin` 文件名精确对齐：
-
-```cmake
-set_target_properties(my_plugin PROPERTIES
-    PREFIX ""	//强制约定产物前缀为空
-    SUFFIX ".so"//后缀名为so文件
-)
-```
-
-### 2.编译流程
-
-本模板支持利用同目录下的专属 `Dockerfile` 进行容器隔离编译：
-
-#### (1)构建模板专属开发编译镜像 (仅首次需要)
-
-在模板根目录下执行：
+本地编译适合前期快速检查，不作为最终交付产物：
 
 ```bash
-docker build -t uestcradar-template-build . \	#构建的镜像名称
-      -f Dockerfile.build_cross					#使用的dockerfile
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j"$(nproc)"
 ```
 
-#### (2)挂载当前目录在容器中隔离编译
+默认只生成 `build/my_plugin.so`，不会构建测试和 Benchmark。
 
-挂载模板文件夹并在隔离容器中编译，直接输出动态插件库：
+### ARM64 交叉编译
+
+部署到 ARM64 目标机时，最终 `.so` 必须交叉编译。先构建一次交叉编译镜像：
 
 ```bash
-docker run --rm \                    # 编译完成后自动销毁并清理容器实例，防止垃圾容器残留
-  --user "$(id -u):$(id -g)" \       # 以宿主机当前用户的 UID:GID 身份运行，确保生成的编译产物所有权不被 root 锁死
-  -v "$(pwd):/workspace" \           # 将宿主机当前目录挂载映射到容器内虚拟路径 /workspace
-  -w /workspace \                    # 设置容器内工作路径为挂载的 /workspace 目录
-  uestcradar-template-build \        # 使用刚才构建的专属模板编译镜像
-  bash -lc "cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j\$(nproc)"
-                                     # 启动 Bash 登录环境，一键执行 CMake 配置、Release 优化设置及并行编译
+docker build -t uestcradar-template-build \
+  -f Dockerfile.build_cross .
 ```
+
+再在模板根目录构建生产插件和最终测试程序：
 
 ```bash
-rm -rf build
-docker run --rm --user "$(id -u):$(id -g)" -v "$(pwd):/workspace" -w /workspace uestcradar-template-build bash -lc "cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j\$(nproc)"
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  -v "$(pwd):/workspace" \
+  -w /workspace \
+  uestcradar-template-build \
+  bash -lc "cmake -S . -B build-cross \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+    -DBUILD_TESTING=ON \
+    -DBUILD_BENCHMARKS=ON &&
+    cmake --build build-cross -j\$(nproc)"
 ```
 
-#### (3)编译产物获取
+交付产物是 `build-cross/my_plugin.so`，不是本地 `build/my_plugin.so`。交付前可执行
+`file build-cross/my_plugin.so`，确认结果为 `ARM aarch64`。
 
-* **挂载映射直出**：得益于第二步中 `-v "$(pwd):/workspace"` 挂载参数，编译生成的插件会**自动同步并直接呈现在宿主机本地工程根目录下的 `build/` 文件夹中**，无需执行 `docker cp` 命令从容器内手动提取。
-* **宿主机物理路径**：`build/my_plugin.so`。
+## 正确性测试
+
+在 `test/qa_algorithm_block.cpp` 中填写真实 `Params`、每次输入/输出元素数、输入
+数据、期望输出和缓冲容量。在 `test/qa_plugin_load.cpp` 中填写插件名、Block key
+和一帧验证数据。
+
+前期可在本机执行：
+
+```bash
+cmake -S . -B build-test \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DBUILD_TESTING=ON
+cmake --build build-test -j"$(nproc)"
+ctest --test-dir build-test --output-on-failure
+```
+
+测试必须通过数值正确性、输入不足、输出阻塞和真实 `.so` 加载检查。最终交付前，还
+必须在 ARM64 目标环境运行交叉编译出的：
+
+```bash
+./build-cross/qa_algorithm_block
+./build-cross/qa_plugin_load ./build-cross/my_plugin.so
+```
+
+算法核心单元测试可以保留，但不能替代上述测试。
+
+## 性能测试
+
+在 `test/bm_algorithm_block.cpp` 中填写真实 `Params`、输入/输出类型、每次输入元素数
+`N`、输出元素数 `M`、缓冲容量和一帧预生成输入。可选填写目标输入速率
+`Mitems/s`。支持多个运行尺寸时，在该文件中增加多个 case。
+
+前期可在本机运行 Release Benchmark：
+
+```bash
+cmake -S . -B build-benchmark \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_BENCHMARKS=ON
+cmake --build build-benchmark -j"$(nproc)"
+./build-benchmark/bm_algorithm_block
+```
+
+最终性能结果必须在 ARM64 目标环境使用交叉编译程序运行：
+
+```bash
+./build-cross/bm_algorithm_block
+```
+
+需要更长测试时可传入最短测量毫秒数、预热次数和最少正式调用次数：
+
+```bash
+./build-cross/bm_algorithm_block 3000 500 1000
+```
+
+结果包含成功/失败调用数、延迟、输入/输出吞吐和带宽，表示当前目标机上完整算法
+Block 的饱和处理上限，不代表设备、网络、磁盘或整套系统性能。
+
+## 交付产物
+
+最终交付：
+
+- 算法源码及已适配的三个测试文件
+- 全部正确性测试通过的记录
+- ARM64 目标环境的 Release Benchmark 配置和结果
+- `build-cross/my_plugin.so`
+
+交付前再次确认插件名、`.so` 文件名和 Block key 与部署配置一致。不得用本地
+x86_64 编译的 `.so` 代替交叉编译产物，也不得交付对 `sdk/include/**` 的修改。

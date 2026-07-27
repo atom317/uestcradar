@@ -14,6 +14,7 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # 🟢 包含各个独立的 C++ 算子子项目
+add_subdirectory(sdk)
 add_subdirectory(fft)
 add_subdirectory(ifft)
 add_subdirectory(pulse_compression)

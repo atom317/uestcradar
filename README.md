@@ -54,9 +54,10 @@ uestcradar/
 ## C++ 算子插件 (C++ 部分)
 
 C++ 算子插件通过 YAML 流图配置文件进行动态拓扑连接。新算法使用 Cycore SDK
-帧级接口：流图边统一传输 `std::byte`，SDK 负责拆帧、完整性校验、Codec 调用、
-元数据透传和输出封包，算法 `work()` 只处理自行定义的强类型 `InputData` /
-`OutputData`。仓库仍保留部分待迁移的旧 `Reader` / `Writer` 算子。
+帧级接口：流图边统一传输 `std::byte`，SDK 负责拆帧、精确长度校验、POD
+整块复制、元数据透传和输出封包，算法 `work()` 只处理固定容量且平凡可复制的
+`InputData` / `OutputData`。算法无需编写 Codec。仓库仍保留部分待迁移的旧
+`Reader` / `Writer` 算子。
 
 ### 1. 级联流水线拓扑
 
@@ -85,7 +86,9 @@ graph TD
 
 ### 3. C++ 新算子开发模板 (algorithm_template)
 
-为了便于开发者快速构建、本地调试及跨平台容器化编译全新的 C++ 雷达流图算子，项目根目录下内置了专属的算子开发模板脚手架。该模板已集成核心 SDK 头文件映射、CMake 编译框架、完整帧 QA，以及基于 `CYCORE_REGISTER_BENCHMARK` 的一键式性能基线工具。
+为了便于开发者快速构建、本地调试及跨平台容器化编译全新的 C++ 雷达流图算子，
+仓库内置了 POD 帧级模板。模板直接使用唯一 SDK `cpp/sdk/include`，不携带 SDK
+副本，并集成完整帧 QA 与 `CYCORE_REGISTER_BENCHMARK` 一键性能基线。
 
 > [!IMPORTANT]
 > 📖 关于如何基于脚手架模板克隆新算法、制定数据格式、执行本地静态自检沙盒测试以及进行 AArch64 容器化交叉编译，请参阅：

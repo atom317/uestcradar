@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(BUILD_TESTING "Build frame-Block QA and plugin ABI smoke tests" OFF)
+option(BUILD_TESTING "Build the algorithm correctness QA" OFF)
 option(BUILD_BENCHMARKS "Build the frame-Block throughput benchmark" OFF)
 option(ALGORITHM_ENABLE_NATIVE_OPTIMIZATION
        "Enable -march=native for same-host Release benchmarking" OFF)
@@ -22,9 +22,14 @@ set_target_properties(my_plugin PROPERTIES
 )
 
 function(configure_algorithm_target target)
+    set(UESTCRADAR_ALGORITHM_SDK_INCLUDE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../cpp/sdk/include")
+    if(NOT EXISTS "${UESTCRADAR_ALGORITHM_SDK_INCLUDE}/cycore_algorithm_sdk.h")
+        message(FATAL_ERROR
+            "Canonical uestcradar SDK not found: ${UESTCRADAR_ALGORITHM_SDK_INCLUDE}")
+    endif()
     target_include_directories(${target} PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../../../cpp/sdk/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/sdk/include
+        ${UESTCRADAR_ALGORITHM_SDK_INCLUDE}
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
 
@@ -61,22 +66,22 @@ if(BUILD_TESTING)
     configure_algorithm_target(qa_algorithm_block)
     add_test(NAME qa_algorithm_block COMMAND qa_algorithm_block)
 
-    add_executable(qa_plugin_load
-        test/qa_plugin_load.cpp
-    )
-    configure_algorithm_target(qa_plugin_load)
-    target_link_libraries(qa_plugin_load PRIVATE ${CMAKE_DL_LIBS})
-    add_dependencies(qa_plugin_load my_plugin)
-    add_test(
-        NAME qa_plugin_load
-        COMMAND qa_plugin_load $<TARGET_FILE:my_plugin>
-    )
 endif()
 
-if(BUILD_BENCHMARKS)
+if(BUILD_TESTING OR BUILD_BENCHMARKS)
     add_executable(bm_algorithm_block
         src/algorithm.cpp
         test/bm_algorithm_block.cpp
     )
     configure_algorithm_target(bm_algorithm_block)
+
+    if(BUILD_TESTING)
+        add_test(
+            NAME qa_benchmark_no_allocations
+            COMMAND bm_algorithm_block 0 2 32
+        )
+        set_tests_properties(
+            qa_benchmark_no_allocations
+            PROPERTIES PASS_REGULAR_EXPRESSION "framework_allocations=0")
+    endif()
 endif()

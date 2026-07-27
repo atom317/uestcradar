@@ -5,8 +5,9 @@ description: 指导 Agent 基于模板脚手架，以“格式制定 → 空壳�
 # Cycore Flowgraph 算子开发指南
 
 > [!IMPORTANT]
-> **与 CyCore 的开发依赖关系**：
-> 本独立算法库（uestcradar）在开发 C++ 算子 Wrapper 接口时，依赖于 `cycore` 流图引擎的 SDK（例如 Flowgraph 的 Block、Port、Buffer 核心头文件）。在开发和编译过程中如果遇到相关的编译报错（如找不到核心类或 ABI 接口不兼容），请检查并确认开发环境上的 `cycore` SDK 头文件与库文件是否已更新同步至最新版本。
+> **唯一 SDK 真源**：
+> 算法开发只使用本仓库 `cpp/sdk/include`。模板不得携带、复制或同步第二套 SDK。
+> 上下游插件必须使用兼容的编译器 ABI、对象布局和字节序。
 
 ## 💡 核心开发工作流 (必须严格按阶段顺序执行)
 
@@ -20,8 +21,14 @@ graph TD
 
 ### 📂 阶段一：制定数据格式 (I/O Specification)
 
-1. **业务强类型**：算法自行定义 `InputData`、`OutputData` 及其 `FrameCodec<T>`；SDK 不预设业务结构。
-2. **职责隔离**：Codec 只处理业务 Payload，算法不得解析 SDK Envelope、手工透传元数据或操作字节流。
+1. **POD 强类型**：算法自行定义默认可构造且
+   `std::is_trivially_copyable_v<T>` 的 `InputData`、`OutputData`。
+2. **固定内联存储**：只使用标量、平凡嵌套结构和 `std::array`；禁止
+   `std::vector`、字符串、指针、Span/View、虚函数和拥有外部内存的成员。
+3. **0 手写 Codec**：Payload 固定为 `sizeof(T)`，SDK 使用单次 `memcpy`
+   自动收发。算法不得解析 Envelope、手工透传元数据或操作字节流。
+4. **确定性对象表示**：输入先 `{}` 初始化；每次 `Produced` 前覆盖或清零输出的
+   全部成员，禁止把上一帧未使用数组区域继续发送。
    *详细规范请参阅子指南：[2. 输入输出数据格式制定规范](references/data-format-specification.md)*
 
 ### 📂 阶段二：空壳算子全系统联调 (Skeleton Integration)
@@ -34,8 +41,8 @@ graph TD
 
 ### 📂 阶段三: 算法实现与闭环自检 (Implementation & Verification)
 
-1. **算法编写**：在骨架验证通过后，直接处理 SDK 已解码的完整 `InputData`，并写入预分配的 `OutputData`。字节拆帧、折返拼接、输入消费和输出封包均由 SDK 负责。
-2. **沙盒自检**：在测试主程序中直接实例化静态测试 Block（`SimSource` / `SimSink`）组成仿真流图，对输出结果进行严苛的 Epsilon 理论精度与通道隔离度 assert断言。
+1. **算法编写**：在骨架验证通过后，直接处理 SDK 已完整复制的 `InputData`，并写入固定容量的 `OutputData`。字节拆帧、折返拼接、输入消费和输出封包均由 SDK 负责。
+2. **沙盒自检**：只在 `test/qa_algorithm_block.cpp` 中直接实例化静态测试 Block（`SimSource` / `SimSink`），对输出结果进行 Epsilon 理论精度与通道隔离度断言。不要在算法模板新增插件加载、编译失败、分配探测或 CMake 辅助测试。
    *详细模板与自检规范请参阅子指南：[3. 算法实现与自检规范](references/algorithm-implementation.md)*
 
 ### 📂 阶段四：Benchmark 基线评估
@@ -47,6 +54,8 @@ Harness 完成。
 
 Harness 自动输出 frames/s、Payload GiB/s、平均延迟、稳态分配次数及 checksum。
 具体写法见 [算法实现与自检规范](references/algorithm-implementation.md)。
+算法模板的 `test/` 目录只保留 `qa_algorithm_block.cpp` 和
+`bm_algorithm_block.cpp`；框架级防御测试由 SDK/Core 自身维护。
 
 ### 📂 阶段五：算法实际物理部署 (Actual Deployment)
 
@@ -63,8 +72,8 @@ Harness 自动输出 frames/s、Payload GiB/s、平均延迟、稳态分配次�
 * [1. 模板目录结构与修改范围](references/template-structure.md)
   * **前期准备**：熟悉开发脚手架和修改范围。
 * [2. 输入输出数据格式制定规范](references/data-format-specification.md)
-  * 执行阶段一（制定格式）时阅读，学习业务强类型与 Codec 规约。
+  * 执行阶段一（制定格式）时阅读，学习 POD 类型、固定容量和原生 ABI 规约。
 * [3. 算法实现与自检规范](references/algorithm-implementation.md)
   * 执行阶段三（编写与自检）时阅读，学习强类型帧处理、完整性边界和静态自检沙盒。
 * [C++ 雷达算法统一部署运维手册 (cpp_algorithm_ops)](../cpp_algorithm_ops/SKILL.md)
-  * 执行阶段四（编译部署）时阅读，获取最新的分布式环境变量定义、AArch64交叉编译、单测前置熔断以及容器热重启命令。
+  * 执行阶段五（编译部署）时阅读，获取最新的分布式环境变量定义、AArch64交叉编译、单测前置熔断以及容器热重启命令。

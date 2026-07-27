@@ -1,32 +1,30 @@
 # 1. 模板目录结构
 
-基于 `develop_new_algorithm` 技能开发新算子时，优先基于 [algorithm_template](../algorithm_template) 脚手架进行开发。
+新算子只基于本仓库
+[algorithm_template](../algorithm_template) 脚手架开发：
 
 ```text
 algorithm_template/
 ├── CMakeLists.txt
-├── include/data.h              # 算法自定义 InputData/OutputData
-├── include/codec.h             # 业务 Payload 编解码契约
+├── include/data.h              # POD InputData/OutputData
 ├── include/algorithm.h         # 强类型算法接口
 ├── src/algorithm.cpp           # 算法实现
 ├── src/algorithm_block.cpp     # 帧级插件导出宏
-├── test/                       # 完整帧 QA、插件加载和一键注册 Benchmark
-└── sdk/include/                # 只读 Cycore SDK 头文件
+└── test/                       # 算法正确性 QA 和 Benchmark
 ```
 
-### 开发者修改范围：
-* `include/data.h`
-* `include/codec.h`
-* `include/algorithm.h`
-* `src/algorithm.cpp`
-* `src/algorithm_block.cpp`
-* `test/qa_algorithm_block.cpp`
-* `test/qa_plugin_load.cpp`
-* `test/bm_algorithm_block.cpp`
-* 必要时修改 `CMakeLists.txt` 链接其他算法依赖库。
+模板不携带 SDK 镜像。所有目标统一包含仓库唯一真源
+`uestcradar/cpp/sdk/include`；若该路径不存在，CMake 配置直接失败。
 
-> [!IMPORTANT]
-> 严禁手动修改模板里的 `sdk/include` 目录内容。
+开发者修改：
 
-`test/bm_algorithm_block.cpp` 只填写 `CYCORE_REGISTER_BENCHMARK` 的强类型
-`InputData` 准备 Lambda，不得复制底层流图驱动代码。
+- `include/data.h`
+- `include/algorithm.h`
+- `src/algorithm.cpp`
+- `src/algorithm_block.cpp`
+- `test/qa_algorithm_block.cpp` 中的业务输入和数值断言
+- `test/bm_algorithm_block.cpp` 中的代表性 Benchmark 输入
+- 必要时修改 CMake 以链接算法依赖库
+
+不存在 `codec.h`，也不得新增业务 Codec。Benchmark 只填写
+`CYCORE_REGISTER_BENCHMARK` 的强类型输入准备 Lambda。

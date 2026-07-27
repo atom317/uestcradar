@@ -18,9 +18,11 @@ struct OutputData {
     std::array<float, kMaxSamples> samples{};
 };
 
-static_assert(std::is_trivially_copyable<InputData>::value,
-              "InputData must be trivially copyable");
-static_assert(std::is_trivially_copyable<OutputData>::value,
-              "OutputData must be trivially copyable");
+static_assert(
+    std::is_trivially_copyable_v<InputData>,
+    "Non-trivial data requires a custom FrameCodec, POD only");
+static_assert(
+    std::is_trivially_copyable_v<OutputData>,
+    "Non-trivial data requires a custom FrameCodec, POD only");
 
 } // namespace cycore::algorithm::my_block

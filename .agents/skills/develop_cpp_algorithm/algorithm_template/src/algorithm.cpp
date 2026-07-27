@@ -17,6 +17,7 @@ cycore::sdk::ProcessResult MyAlgorithm::work(const InputData& input,
     if (input.sample_count == 0 || input.sample_count > my_block_data::kMaxSamples) {
         return cycore::sdk::ProcessResult::Drop;
     }
+    output = OutputData{};
     output.sample_count = input.sample_count;
     for (std::size_t i = 0; i < input.sample_count; ++i) {
         output.samples[i] = input.samples[i] * static_cast<float>(factor_);

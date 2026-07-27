@@ -28,7 +28,8 @@ private:
 
 ## 2. 处理强类型完整帧
 
-算法声明自己的输入输出类型，并通过 `work()` 直接处理 SDK 已完成校验和解码的完整帧：
+算法声明自己的 POD 输入输出类型，并通过 `work()` 直接处理 SDK 已完成拆帧和整块
+复制的完整对象：
 
 ```cpp
 class MyAlgorithm {
@@ -77,7 +78,7 @@ constexpr std::size_t Index(std::size_t channel,
 
 测试必须使用生产 `FrameAlgorithmAdapter` 或动态加载后的真实 Block，输入端发布 SDK 线帧，输出端重新组装并解码完整线帧。至少验证：
 
-1. Codec 正常往返及截断 Payload 拒绝；
+1. POD 对象表示逐字节往返，且 `sizeof(T)±1` Payload 被拒绝；
 2. 帧在每个字节位置切分时，残帧不触发算法且不推进读游标；
 3. 环形缓冲区折返后仍能得到同一完整帧；
 4. 输出背压不会导致算法重复执行；
@@ -121,7 +122,8 @@ static cy::flowgraph::ValueMap benchmark_params();
 
 ## 6. YAML 完整配置规范
 
-算子参数仍在 `blocks` 中配置，同时为 Adapter 指定允许的最大输入输出线帧字节数：
+算子参数仍在 `blocks` 中配置。POD Wire 大小由类型唯一确定，不再配置
+`max_input_frame_bytes` 或 `max_output_frame_bytes`：
 
 ```yaml
 blocks:
@@ -129,14 +131,13 @@ blocks:
     type: algorithm.my_block
     plugin: my_plugin.so
     params:
-      max_input_frame_bytes: 4194304
-      max_output_frame_bytes: 4194304
+      algorithm_parameter: 16
 ```
 
 连接容量必须满足：
 
 ```text
-capacity >= 该连接允许的最大完整线帧字节数
+capacity >= 32 + sizeof(该连接上的 POD 类型)
 ```
 
 容量不需要是帧长的整数倍。物理折返、分段读取和完整帧重组由 SDK Adapter 负责；算法不得依赖某一次物理读写窗口恰好连续。

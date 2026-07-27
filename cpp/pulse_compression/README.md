@@ -151,7 +151,7 @@ CYCORE_EXPORT_ALGORITHM(
 
 1. **包含 SDK 头文件目录**：
    ```cmake
-   include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../.agents/skills/develop_cpp_algorithm/algorithm_template/sdk/include)
+   include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../sdk/include)
    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
    ```
 2. **声明为 MODULE 插件目标**：

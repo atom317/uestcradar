@@ -138,25 +138,6 @@ struct BenchmarkParams<
     }
 };
 
-inline std::size_t configured_limit(const cy::flowgraph::ValueMap& values,
-                                    const char* key,
-                                    std::size_t required) {
-    const auto configured =
-        cycore::sdk::Params(values).get<std::int64_t>(key, 0);
-    if (configured <= 0) {
-        return required;
-    }
-    return std::max(required, static_cast<std::size_t>(configured));
-}
-
-inline std::int64_t checked_int64(std::size_t value, const char* name) {
-    if (value > static_cast<std::size_t>(
-                    std::numeric_limits<std::int64_t>::max())) {
-        throw std::length_error(std::string(name) + " exceeds int64_t");
-    }
-    return static_cast<std::int64_t>(value);
-}
-
 inline void publish(cy::flowgraph::PortOut<std::byte>& source,
                     cy::common::Span<const std::byte> wire) {
     std::size_t offset = 0;
@@ -191,68 +172,45 @@ class FrameBenchmarkDriver {
 public:
     using InputData = typename Algorithm::InputData;
     using OutputData = typename Algorithm::OutputData;
-    using InputCodec = cycore::sdk::FrameCodec<InputData>;
-    using OutputCodec = cycore::sdk::FrameCodec<OutputData>;
+    using InputCodec = cycore::sdk::TrivialFrameCodec<InputData>;
+    using OutputCodec = cycore::sdk::TrivialFrameCodec<OutputData>;
 
     template <typename Prepare>
     explicit FrameBenchmarkDriver(Prepare&& prepare)
-        : values_(BenchmarkParams<Algorithm>::get()) {
-        static_assert(std::is_default_constructible<InputData>::value,
+        : values_(BenchmarkParams<Algorithm>::get()),
+          input_data_(std::make_unique<InputData>()),
+          output_data_(std::make_unique<OutputData>()) {
+        static_assert(std::is_trivially_copyable_v<InputData>,
+                      "Non-trivial data requires a custom FrameCodec, POD only");
+        static_assert(std::is_trivially_copyable_v<OutputData>,
+                      "Non-trivial data requires a custom FrameCodec, POD only");
+        static_assert(std::is_default_constructible_v<InputData>,
                       "Benchmark InputData must be default constructible");
-        static_assert(std::is_default_constructible<OutputData>::value,
+        static_assert(std::is_default_constructible_v<OutputData>,
                       "Benchmark OutputData must be default constructible");
 
-        prepare(input_data_);
-        const std::size_t input_payload_bytes =
-            InputCodec::encoded_size(input_data_);
-        if (input_payload_bytes == 0) {
-            throw std::length_error("benchmark input Codec returned an empty payload");
-        }
+        prepare(*input_data_);
+        constexpr std::size_t input_payload_bytes = sizeof(InputData);
         input_payload_.resize(input_payload_bytes);
         if (!InputCodec::encode(
-                input_data_,
+                *input_data_,
                 cy::common::Span<std::byte>(
                     input_payload_.data(), input_payload_.size()))) {
-            throw std::runtime_error("benchmark input Codec encode failed");
+            throw std::runtime_error("benchmark input POD copy failed");
         }
 
-        OutputData preflight_output{};
-        Algorithm preflight_algorithm{cycore::sdk::Params(values_)};
-        cycore::sdk::ProcessResult preflight_result =
-            cycore::sdk::ProcessResult::Retry;
-        for (std::size_t attempt = 0; attempt < 16 &&
-                                      preflight_result ==
-                                          cycore::sdk::ProcessResult::Retry;
-             ++attempt) {
-            preflight_result =
-                preflight_algorithm.work(input_data_, preflight_output);
-        }
-        if (preflight_result != cycore::sdk::ProcessResult::Produced) {
-            throw std::runtime_error(
-                "benchmark preflight must produce one output frame");
-        }
-
-        const std::size_t output_payload_bytes =
-            OutputCodec::encoded_size(preflight_output);
+        constexpr std::size_t output_payload_bytes = sizeof(OutputData);
         input_wire_bytes_ =
             cycore::sdk::WireFrameBytes(input_payload_.size());
         output_wire_bytes_ =
             cycore::sdk::WireFrameBytes(output_payload_bytes);
-        max_input_frame_bytes_ = configured_limit(
-            values_, "max_input_frame_bytes", input_wire_bytes_);
-        max_output_frame_bytes_ = configured_limit(
-            values_, "max_output_frame_bytes", output_wire_bytes_);
-        values_["max_input_frame_bytes"] =
-            checked_int64(max_input_frame_bytes_, "max_input_frame_bytes");
-        values_["max_output_frame_bytes"] =
-            checked_int64(max_output_frame_bytes_, "max_output_frame_bytes");
 
         input_wire_.resize(input_wire_bytes_);
-        output_wire_.resize(max_output_frame_bytes_);
+        output_wire_.resize(output_wire_bytes_);
         adapter_ = std::make_unique<
             cycore::sdk::FrameAlgorithmAdapter<Algorithm>>(values_);
         const std::size_t capacity =
-            std::max(max_input_frame_bytes_, max_output_frame_bytes_);
+            std::max(input_wire_bytes_, output_wire_bytes_);
         cy::flowgraph::connect(source_, adapter_->in, capacity);
         cy::flowgraph::connect(adapter_->out, sink_, capacity);
     }
@@ -301,7 +259,7 @@ public:
         }
         auto inspection = cycore::sdk::InspectFrame(
             cy::common::Span<const std::byte>(header.data(), header.size()),
-            max_output_frame_bytes_);
+            output_wire_bytes_);
         if (inspection.wire_bytes == 0 ||
             inspection.wire_bytes > output_wire_.size() ||
             sink_.available() < inspection.wire_bytes) {
@@ -316,7 +274,7 @@ public:
         }
         inspection = cycore::sdk::InspectFrame(
             cy::common::Span<const std::byte>(wire.data(), wire.size()),
-            max_output_frame_bytes_);
+            output_wire_bytes_);
         if (inspection.status !=
             cycore::sdk::FrameParseStatus::CompleteFrame) {
             throw std::runtime_error(
@@ -330,9 +288,9 @@ public:
         const auto output_payload = cy::common::Span<const std::byte>(
             output_wire_.data() + cycore::sdk::kFrameEnvelopeBytes,
             inspection.payload_bytes);
-        if (!OutputCodec::decode(output_payload, output_data_)) {
+        if (!OutputCodec::decode(output_payload, *output_data_)) {
             throw std::runtime_error(
-                "benchmark output Codec decode failed");
+                "benchmark output POD copy failed");
         }
         update_checksum(checksum_, output_payload);
         if (!sink_.consume_exact(inspection.wire_bytes)) {
@@ -363,8 +321,8 @@ public:
 
 private:
     cy::flowgraph::ValueMap values_;
-    InputData input_data_{};
-    OutputData output_data_{};
+    std::unique_ptr<InputData> input_data_;
+    std::unique_ptr<OutputData> output_data_;
     std::vector<std::byte> input_payload_;
     std::vector<std::byte> input_wire_;
     std::vector<std::byte> output_wire_;
@@ -373,8 +331,6 @@ private:
     cy::flowgraph::PortIn<std::byte> sink_;
     std::size_t input_wire_bytes_ = 0;
     std::size_t output_wire_bytes_ = 0;
-    std::size_t max_input_frame_bytes_ = 0;
-    std::size_t max_output_frame_bytes_ = 0;
     std::size_t maximum_idle_rounds_ = 1024;
     std::uint64_t checksum_ = 1469598103934665603ULL;
 };

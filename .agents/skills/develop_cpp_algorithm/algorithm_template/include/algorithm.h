@@ -1,6 +1,6 @@
 #pragma once
 
-#include "codec.h"
+#include "data.h"
 
 #include <cycore_algorithm_sdk.h>
 

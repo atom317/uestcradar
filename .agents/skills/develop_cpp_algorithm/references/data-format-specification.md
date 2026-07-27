@@ -1,48 +1,56 @@
-# 输入输出数据格式规范
+# 输入输出 POD 数据规范
 
-Flowgraph 边的物理类型固定为 `std::byte`，SDK 负责公共 Envelope、拆帧、完整性校验、序列统计和输出封包。算法只定义业务 Payload。
+Flowgraph 边的物理类型固定为 `std::byte`。SDK 负责 32B Envelope、拆帧、
+长度校验、序列统计、元数据透传和输出封包；算法只定义固定大小的业务对象。
 
----
+## 1. 类型约束
 
-## 1. 业务强类型规范
-
-算法开发者自行定义 `InputData` 和 `OutputData`。SDK 不限制业务字段，但类型必须可默认构造，且应使用固定容量存储避免稳态堆分配：
+`InputData` 和 `OutputData` 必须默认可构造且满足：
 
 ```cpp
+std::is_trivially_copyable_v<T>
+```
+
+允许基础标量、枚举、平凡嵌套结构和 `std::array`。禁止 `std::vector`、
+`std::string`、裸指针、智能指针、Span/View、虚函数及拥有外部内存的成员。
+C++17 无法从 `is_trivially_copyable` 自动识别原始指针的传输语义，因此指针禁令
+同时属于代码审查硬约束。
+
+```cpp
+inline constexpr std::size_t kMaxSamples = 4096;
+
 struct InputData {
     std::uint32_t sample_count = 0;
-    std::array<float, kMaxSamples> samples{};
+    std::array<cy::common::CS16, kMaxSamples> samples{};
 };
 
-struct OutputData {
-    std::uint32_t sample_count = 0;
-    std::array<float, kMaxSamples> samples{};
-};
+static_assert(
+    std::is_trivially_copyable_v<InputData>,
+    "Non-trivial data requires a custom FrameCodec, POD only");
 ```
 
-业务结构内部可以复用 `cy::common::CS16`、`CF32` 等项目类型，也可以定义算法需要的其他字段。不要把包含拥有型动态内存的对象直接按内存布局发送。
+输入对象必须使用 `{}` 初始化后再填写有效字段；算法每次返回 `Produced` 前必须
+确定性覆盖或清零 `OutputData` 的全部成员，避免未使用数组区域携带上一帧数据。
 
----
+## 2. 固定 Wire 契约
 
-## 2. FrameCodec 规范
+SDK 使用 `TrivialFrameCodec<T>` 自动执行整块 `memcpy`：
 
-分别为输入和输出类型实现 `cycore::sdk::FrameCodec<T>`：
-
-- `encoded_size()` 返回业务 Payload 的准确字节数；
-- `encode()` 只写业务 Payload；
-- `decode()` 严格检查长度、数量、维度和溢出后再构造强类型对象；
-- Codec 不解析或生成 SDK Envelope，不处理 sequence 和 timestamp；
-- Payload 长度可以逐帧变化，但不得超过配置的最大线帧字节数。
-
-```cpp
-template <>
-struct FrameCodec<InputData> {
-    static std::size_t encoded_size(const InputData& value);
-    static bool encode(const InputData& value,
-                       cy::common::Span<std::byte> payload) noexcept;
-    static bool decode(cy::common::Span<const std::byte> payload,
-                       InputData& value) noexcept;
-};
+```text
+[32B SDK Envelope][sizeof(T) 原生对象内存]
 ```
 
-边的 YAML `capacity` 必须不小于该连接允许的最大完整线帧字节数。无需把容量设置成帧长的整数倍；环形折返由 SDK 处理。
+开发者不编写、特化或包含任何 Codec。`sample_count`、`rows`、`cols` 等字段只描述
+固定容量对象中的有效区域，不改变 Payload 字节数。业务字段非法时由算法
+`work()` 返回 `Drop`。
+
+该协议采用原生对象表示，只支持兼容的编译器 ABI、结构体布局和字节序。调整字段
+顺序、字段类型、数组容量或编译 ABI 都属于数据契约变更。
+
+每条边必须满足：
+
+```text
+capacity >= 32 + sizeof(该边的数据类型)
+```
+
+容量不需要是帧长整数倍；残帧等待和环形折返由 SDK 处理。

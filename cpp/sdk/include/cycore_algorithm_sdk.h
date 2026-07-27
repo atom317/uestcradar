@@ -707,7 +707,33 @@ struct FrameStats {
 };
 
 template <typename T>
-struct FrameCodec;
+struct TrivialFrameCodec {
+    static_assert(
+        std::is_trivially_copyable_v<T>,
+        "Non-trivial data requires a custom FrameCodec, POD only");
+
+    static constexpr std::size_t encoded_size(const T&) noexcept {
+        return sizeof(T);
+    }
+
+    static bool encode(const T& value,
+                       cy::common::Span<std::byte> payload) noexcept {
+        if (payload.size() != sizeof(T)) {
+            return false;
+        }
+        std::memcpy(payload.data(), std::addressof(value), sizeof(T));
+        return true;
+    }
+
+    static bool decode(cy::common::Span<const std::byte> payload,
+                       T& value) noexcept {
+        if (payload.size() != sizeof(T)) {
+            return false;
+        }
+        std::memcpy(std::addressof(value), payload.data(), sizeof(T));
+        return true;
+    }
+};
 
 namespace detail {
 
@@ -849,23 +875,6 @@ inline FrameInspection inspect_frame(cy::common::Span<const std::byte> bytes,
     return result;
 }
 
-inline std::size_t configured_frame_limit(const Params& params,
-                                          const char* key,
-                                          std::size_t fallback) {
-    const auto configured = params.get<std::int64_t>(
-        key, static_cast<std::int64_t>(fallback));
-    if (configured < static_cast<std::int64_t>(kMinimumWireFrameBytes)) {
-        throw std::invalid_argument(std::string(key) +
-                                    " must fit a non-empty SDK wire frame");
-    }
-    if (static_cast<std::uint64_t>(configured) >
-        static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-        throw std::invalid_argument(std::string(key) +
-                                    " exceeds the platform size limit");
-    }
-    return static_cast<std::size_t>(configured);
-}
-
 } // namespace detail
 
 inline std::size_t WireFrameBytes(std::size_t payload_bytes) {
@@ -902,26 +911,35 @@ class FrameAlgorithmAdapter
 public:
     using InputData = typename Algorithm::InputData;
     using OutputData = typename Algorithm::OutputData;
-    using InputCodec = FrameCodec<InputData>;
-    using OutputCodec = FrameCodec<OutputData>;
+    using InputCodec = TrivialFrameCodec<InputData>;
+    using OutputCodec = TrivialFrameCodec<OutputData>;
+
+    static_assert(
+        std::is_trivially_copyable_v<InputData>,
+        "Non-trivial data requires a custom FrameCodec, POD only");
+    static_assert(
+        std::is_trivially_copyable_v<OutputData>,
+        "Non-trivial data requires a custom FrameCodec, POD only");
+    static_assert(std::is_default_constructible_v<InputData>,
+                  "Frame algorithm InputData must be default constructible");
+    static_assert(std::is_default_constructible_v<OutputData>,
+                  "Frame algorithm OutputData must be default constructible");
+
+    static constexpr std::size_t kInputWireBytes =
+        kFrameEnvelopeBytes + sizeof(InputData);
+    static constexpr std::size_t kOutputWireBytes =
+        kFrameEnvelopeBytes + sizeof(OutputData);
 
     cy::flowgraph::PortIn<std::byte> in;
     cy::flowgraph::PortOut<std::byte> out;
     CY_MAKE_REFLECTABLE(FrameAlgorithmAdapter, in, out);
 
     explicit FrameAlgorithmAdapter(const cy::flowgraph::ValueMap& values)
-        : max_input_frame_bytes_(detail::configured_frame_limit(
-              Params(values), "max_input_frame_bytes", 8U * 1024U * 1024U)),
-          max_output_frame_bytes_(detail::configured_frame_limit(
-              Params(values), "max_output_frame_bytes", 8U * 1024U * 1024U)),
-          input_staging_(max_input_frame_bytes_),
-          output_staging_(max_output_frame_bytes_),
-          algorithm_(std::make_unique<Algorithm>(Params(values))) {
-        static_assert(std::is_default_constructible<InputData>::value,
-                      "Frame algorithm InputData must be default constructible");
-        static_assert(std::is_default_constructible<OutputData>::value,
-                      "Frame algorithm OutputData must be default constructible");
-    }
+        : input_staging_(kInputWireBytes),
+          output_staging_(kOutputWireBytes),
+          algorithm_(std::make_unique<Algorithm>(Params(values))),
+          input_data_(std::make_unique<InputData>()),
+          output_data_(std::make_unique<OutputData>()) {}
 
     bool process_work() {
         if (output_pending_) {
@@ -956,10 +974,17 @@ private:
         }
         auto inspection = InspectFrame(
             cy::common::Span<const std::byte>(header.data(), header.size()),
-            max_input_frame_bytes_);
+            kInputWireBytes);
         if (inspection.status == FrameParseStatus::InvalidFrame) {
             record_frame_error(inspection.error);
             consume_or_throw(inspection.discard_bytes);
+            ++stats_.frames_dropped;
+            return true;
+        }
+        if (inspection.wire_bytes != 0 &&
+            inspection.wire_bytes != kInputWireBytes) {
+            record_frame_error(FrameError::BadFrameSize);
+            consume_or_throw(1);
             ++stats_.frames_dropped;
             return true;
         }
@@ -975,7 +1000,7 @@ private:
         }
         inspection = InspectFrame(
             cy::common::Span<const std::byte>(wire.data(), wire.size()),
-            max_input_frame_bytes_);
+            kInputWireBytes);
         ++stats_.frames_received;
         if (inspection.status != FrameParseStatus::CompleteFrame) {
             record_frame_error(inspection.error);
@@ -989,15 +1014,7 @@ private:
         const auto payload = cy::common::Span<const std::byte>(
             input_staging_.data() + kFrameEnvelopeBytes,
             inspection.payload_bytes);
-        bool decoded = false;
-        try {
-            decoded = InputCodec::decode(payload, input_data_);
-        } catch (...) {
-            consume_or_throw(inspection.wire_bytes);
-            ++stats_.codec_failures;
-            ++stats_.frames_dropped;
-            throw;
-        }
+        const bool decoded = InputCodec::decode(payload, *input_data_);
         consume_or_throw(inspection.wire_bytes);
         if (!decoded) {
             ++stats_.codec_failures;
@@ -1012,7 +1029,8 @@ private:
     }
 
     bool invoke_algorithm() {
-        const ProcessResult result = algorithm_->work(input_data_, output_data_);
+        const ProcessResult result =
+            algorithm_->work(*input_data_, *output_data_);
         if (result == ProcessResult::Retry) {
             ++stats_.work_retries;
             return false;
@@ -1023,17 +1041,13 @@ private:
             return true;
         }
 
-        const std::size_t payload_bytes = OutputCodec::encoded_size(output_data_);
+        constexpr std::size_t payload_bytes = sizeof(OutputData);
         std::size_t wire_bytes = 0;
-        if (!detail::checked_wire_size(payload_bytes, &wire_bytes) ||
-            wire_bytes > max_output_frame_bytes_) {
-            throw std::length_error("Frame algorithm output exceeds max_output_frame_bytes");
-        }
         auto payload = cy::common::Span<std::byte>(
             output_staging_.data() + kFrameEnvelopeBytes, payload_bytes);
-        if (!OutputCodec::encode(output_data_, payload)) {
+        if (!OutputCodec::encode(*output_data_, payload)) {
             ++stats_.codec_failures;
-            throw std::runtime_error("Frame output codec failed");
+            throw std::runtime_error("Trivial frame output copy failed");
         }
         if (!detail::seal_frame(
                 cy::common::Span<std::byte>(output_staging_.data(),
@@ -1042,6 +1056,9 @@ private:
                 current_metadata_,
                 &wire_bytes)) {
             throw std::runtime_error("Failed to seal SDK output frame");
+        }
+        if (wire_bytes != kOutputWireBytes) {
+            throw std::runtime_error("Trivial frame output size mismatch");
         }
 
         input_ready_ = false;
@@ -1119,13 +1136,11 @@ private:
         }
     }
 
-    std::size_t max_input_frame_bytes_ = 0;
-    std::size_t max_output_frame_bytes_ = 0;
     std::vector<std::byte> input_staging_;
     std::vector<std::byte> output_staging_;
     std::unique_ptr<Algorithm> algorithm_;
-    InputData input_data_{};
-    OutputData output_data_{};
+    std::unique_ptr<InputData> input_data_;
+    std::unique_ptr<OutputData> output_data_;
     FrameMetadata current_metadata_{};
     FrameStats stats_{};
     std::size_t output_wire_bytes_ = 0;

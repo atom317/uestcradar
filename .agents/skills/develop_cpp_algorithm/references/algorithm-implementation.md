@@ -6,175 +6,107 @@
 
 ## 1. 配置参数
 
-由于配置字典 `Params` 底层仅支持 `std::int64_t` 变体，为简化代码并避免类型转换，算子内部的整型属性（如通道数、采样点数）**统一使用 `std::int64_t` 进行声明与提取**。
-
-示例：
+由于配置字典 `Params` 底层仅支持 `std::int64_t` 变体，为简化代码并避免类型转换，算子内部的整型属性（如通道数、采样点数）统一使用 `std::int64_t` 进行声明与提取。
 
 ```cpp
 class MyAlgorithm {
 public:
-    MyAlgorithm(const cycore::sdk::Params& params) {
-        // 🟢 所有的整型参数提取，一律用 int64_t 统一提取，无需强转
-        num_channels_ = params.get<std::int64_t>("num_channels", data::kDefaultNumChannels);
-        fft_size_ = params.get<std::int64_t>("fft_size", data::kDefaultSamplesPerPulse);
-    
+    explicit MyAlgorithm(const cycore::sdk::Params& params) {
+        num_channels_ = params.get<std::int64_t>("num_channels", 16);
+        fft_size_ = params.get<std::int64_t>("fft_size", 1024);
         if (num_channels_ <= 0 || fft_size_ <= 0) {
             throw std::invalid_argument("Dimensions must be positive");
         }
     }
 private:
-    std::int64_t num_channels_; 
+    std::int64_t num_channels_;
     std::int64_t fft_size_;
 };
 ```
 
 ---
 
-## 2. 读写数据
+## 2. 处理强类型完整帧
 
-流图基于 Ring Buffer 原地零拷贝设计，算法在 `work` 中使用前面确定的整型尺寸来申请数据空间。如果锁定失败（数据未准备就绪或下游塞满），直接返回 `false` 触发 SDK 事务回滚：
-
-* **读锁定**：调用 `in.read_matrix(1, fft_size_)`（整型参数传入时自动执行 C++ 隐式类型转换）。
-* **写锁定**：调用 `out.reserve_matrix(1, fft_size_)`。
+算法声明自己的输入输出类型，并通过 `work()` 直接处理 SDK 已完成校验和解码的完整帧：
 
 ```cpp
-bool work(Reader<InputSample>& in, Writer<OutputSample>& out) {
-    // 🟢 读写锁定，锁失败则直接退出
-    auto input = in.read_matrix(1, fft_size_);
-    if (!input) return false;
+class MyAlgorithm {
+public:
+    using InputData = my_algorithm::InputData;
+    using OutputData = my_algorithm::OutputData;
 
-    auto output = out.reserve_matrix(1, fft_size_);
-    if (!output) return false;
-  
-    // ... 进入数据寻址计算 ...
-}
+    cycore::sdk::ProcessResult work(const InputData& input,
+                                    OutputData& output) noexcept {
+        if (!BusinessShapeIsValid(input)) {
+            return cycore::sdk::ProcessResult::Drop;
+        }
+        // 直接计算并写入预分配的 output。
+        return cycore::sdk::ProcessResult::Produced;
+    }
+};
 ```
 
+- `Produced`：算法成功生成一个输出帧；SDK 自动编码、封包并透传元数据。
+- `Retry`：保留当前已解码输入，等待条件满足后再次调用算法。
+- `Drop`：丢弃当前业务帧且不产生输出。
 
+算法内部不得解析 SDK Envelope、手动消费输入、处理环形折返、封装输出帧或复制 sequence/timestamp。
 
 ---
 
-## 3. 拆分/寻址读取的数据
+## 3. 数据寻址
 
-锁定后的多通道雷达数据在物理内存上默认采用 **通道交织 (Sample-major / Channel-interleaved)** 连续排布：
-
-```text
-[ Ch0_S0, Ch1_S0 ... ChN_S0 ] [ Ch0_S1, Ch1_S1 ... ChN_S1 ] ...
-└─────── 样点 0 ──────────┘   └─────── 样点 1 ──────────┘
-```
-
-为避免解交织带来的临时拷贝开销，推荐在锁定的一维连续空间上通过跨步步长 (Stride) 直接寻址，拆分提取出各通道的样点并写入输出交织槽中：
-
-$$
-\text{Index}(n, ch) = n \times N_{channels} + ch
-$$
-
-示例：
+通道、脉冲、行列和步长均属于算法自己的业务契约。应在 `InputData`、`OutputData` 或其辅助函数中集中定义索引公式，避免在传输层重复解释布局。
 
 ```cpp
-const InputSample* in_ptr = input->data();
-OutputSample* out_ptr = output->data();
-
-for (std::int64_t n = 0; n < fft_size_; ++n) {
-    for (std::int64_t ch = 0; ch < num_channels_; ++ch) {
-        // 🟢 利用跨步偏移公式，拆分提取出 Ch0 .. ChN 对应样点
-        const auto& sample = in_ptr[n * num_channels_ + ch];
-    
-        // 执行计算，并直接写入对应的输出交织位置
-        out_ptr[n * num_channels_ + ch] = ...;
-    }
+constexpr std::size_t Index(std::size_t channel,
+                            std::size_t pulse,
+                            std::size_t sample,
+                            std::size_t pulses,
+                            std::size_t samples_per_pulse) noexcept {
+    return (channel * pulses + pulse) * samples_per_pulse + sample;
 }
 ```
+
+固定上限的 `std::array`、预分配工作区和外部算法库计划应在构造阶段准备，避免稳态 `work()` 堆分配。
 
 ---
 
-## 4. 仿真数据闭环自检规范 (Validation Sandbox)
+## 4. 闭环自检规范
 
-在第四阶段，严禁使用“前端看波形”这种眼动测试作为通过依据。必须在测试文件中构建纯 C++ 的静态沙盒自检。
+测试必须使用生产 `FrameAlgorithmAdapter` 或动态加载后的真实 Block，输入端发布 SDK 线帧，输出端重新组装并解码完整线帧。至少验证：
 
-### 核心设计规约
+1. Codec 正常往返及截断 Payload 拒绝；
+2. 帧在每个字节位置切分时，残帧不触发算法且不推进读游标；
+3. 环形缓冲区折返后仍能得到同一完整帧；
+4. 输出背压不会导致算法重复执行；
+5. sequence 和 timestamp 正确透传；
+6. 数值结果满足理论解、金标数据和容差要求；
+7. 动态插件端口的物理类型为 `std::byte`。
 
-1. **直接定义静态测试 Block**：
-   在测试 CPP 文件中直接声明继承自 `Block<T>` 的 `SimSource`（仿真信号源）和 `SimSink`（数据校验端）静态对象，实现算法与具体流图的解耦。
-2. **理想数据注入与解析断言**：
-   * **SimSource**：根据被测算法的数据需求，产生或读取理想的测试输入波形/数据向量（如复单音、线性调频脉冲或特征点阵数据）。
-   * **SimSink**：接收算法在 work 后的处理结果，将其与理论解析解（Analytical Solution）进行逐点高精度比对，在指定容差（Epsilon）内执行断言。
-
-### 静态沙盒拓扑与运行模板
-
-```cpp
-// 🟢 通用静态仿真信号源
-template <typename T>
-struct SimSource : public Block<SimSource<T>> {
-    PortOut<T> out;
-    CY_MAKE_REFLECTABLE(SimSource, out);
-    void process_work() {
-        auto span = out.reserve(count);
-        // 产生测试向量并 commit 提交
-        span.commit(count);
-    }
-};
-
-// 🟢 通用静态数据校验 Sink
-template <typename T>
-struct SimSink : public Block<SimSink<T>> {
-    PortIn<T> in;
-    CY_MAKE_REFLECTABLE(SimSink, in);
-    void process_work() {
-        auto span = in.get(count);
-        // 执行理论值比对判定：assert(std::abs(span[i] - expected[i]) < epsilon);
-        span.consume(count);
-    }
-};
-
-int main() {
-    Graph graph;
-    auto& source = graph.emplace<SimSource<InputType>>("source");
-    auto& block = graph.emplace<AlgorithmBlockAdapter<AlgorithmUnderTest>>("algorithm", params);
-    auto& sink = graph.emplace<SimSink<OutputType>>("sink");
-
-    graph.connect(source, "out", block, "in", EdgeOptions{capacity});
-    graph.connect(block, "out", sink, "in", EdgeOptions{capacity});
-
-    graph.init();
-    graph.start();
-    graph.work_once();
-    graph.stop();
-    return 0;
-}
-```
+前端波形观察只能用于系统联调，不能替代自动化数值断言。
 
 ---
 
 ## 5. YAML 完整配置规范
 
-算子在流图 YAML 配置文件中部署时，需满足以下参数与连接配置要求：
-
-### 算子声明与参数配置 (blocks)
-
-必须在 `blocks` 列表中正确注册算子，并配置其所需的整型参数：
+算子参数仍在 `blocks` 中配置，同时为 Adapter 指定允许的最大输入输出线帧字节数：
 
 ```yaml
 blocks:
-  - id: fft
-    type: algorithm.fft_cs16
-    plugin: fft_plugin.so
+  - id: my_algorithm
+    type: algorithm.my_block
+    plugin: my_plugin.so
     params:
-      fft_size: 1024       # 1024 点 FFT
-      num_channels: 16     # 16 通道
+      max_input_frame_bytes: 4194304
+      max_output_frame_bytes: 4194304
 ```
 
-### 内存连续规避配置 (connections)
+连接容量必须满足：
 
-流图底层是环形缓冲区，可能会遇到物理内存折返（非连续）。
-
-* **对策**：尽量不要在算子 C++ 代码里写任何复杂的卷绕和拼接逻辑。强制要求在 YAML 配置文件中，将该算子 Connection 的 `capacity` 设为单次读取大小的整数倍。这在物理上能 100% 保证每次申请锁定出的物理内存块一定是绝对连续的一维空间，开发者可以直接用指针偏移跨步寻址。
-
-```yaml
-connections:
-  - src_block_id: device_source
-    src_port: out
-    dst_block_id: fft
-    dst_port: in
-    capacity: 1024         # 设为单次读取大小的整数倍
+```text
+capacity >= 该连接允许的最大完整线帧字节数
 ```
+
+容量不需要是帧长的整数倍。物理折返、分段读取和完整帧重组由 SDK Adapter 负责；算法不得依赖某一次物理读写窗口恰好连续。

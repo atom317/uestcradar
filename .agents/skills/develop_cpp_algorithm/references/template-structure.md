@@ -5,14 +5,24 @@
 ```text
 algorithm_template/
 ├── CMakeLists.txt
-├── include/data.h              # 样本类型与固定矩阵形状契约
-├── src/algorithm_block.cpp     # 算法 work 实现与导出宏
+├── include/data.h              # 算法自定义 InputData/OutputData
+├── include/codec.h             # 业务 Payload 编解码契约
+├── include/algorithm.h         # 强类型算法接口
+├── src/algorithm.cpp           # 算法实现
+├── src/algorithm_block.cpp     # 帧级插件导出宏
+├── test/                       # 完整帧 QA、插件加载和 Benchmark
 └── sdk/include/                # 只读 Cycore SDK 头文件
 ```
 
 ### 开发者修改范围：
 * `include/data.h`
+* `include/codec.h`
+* `include/algorithm.h`
+* `src/algorithm.cpp`
 * `src/algorithm_block.cpp`
+* `test/qa_algorithm_block.cpp`
+* `test/qa_plugin_load.cpp`
+* `test/bm_algorithm_block.cpp`
 * 必要时修改 `CMakeLists.txt` 链接其他算法依赖库。
 
 > [!IMPORTANT]

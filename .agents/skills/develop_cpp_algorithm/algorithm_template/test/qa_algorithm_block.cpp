@@ -1,30 +1,21 @@
 #include "algorithm.h"
-#include <block_test_harness.h>
-#include "data.h"
 
 #include <cycore_algorithm_sdk.h>
-#include <flowgraph/block_wrapper.h>
-#include <flowgraph/value.h>
 
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <iostream>
-#include <memory>
 #include <stdexcept>
 #include <string>
-#include <utility>
 #include <vector>
 
+namespace data = cycore::algorithm::my_block;
 namespace fg = cy::flowgraph;
 namespace sdk = cycore::sdk;
-namespace data = cycore::algorithm::my_block;
-namespace test_support = cycore::sdk::test;
 
 namespace {
-
-using ProductionBlock =
-    sdk::AlgorithmBlockAdapter<MyAlgorithm, data::InputSample, data::OutputSample>;
-using Harness = test_support::BlockTestHarness<data::InputSample, data::OutputSample>;
 
 void Require(bool condition, const std::string& message) {
     if (!condition) {
@@ -32,139 +23,206 @@ void Require(bool condition, const std::string& message) {
     }
 }
 
-std::unique_ptr<fg::BlockModel> MakeProductionBlock(double factor) {
-    fg::ValueMap params;
-    params["factor"] = factor;
-    return std::unique_ptr<fg::BlockModel>(
-        new fg::BlockWrapper<ProductionBlock>(
-            "algorithm_under_test", fg::BlockTypeName{"algorithm.my_block"}, params));
-}
-
-std::vector<data::InputSample> MakeInput(float offset = 0.0f) {
-    std::vector<data::InputSample> input(data::kInputElementsPerWork);
-    for (std::size_t i = 0; i < input.size(); ++i) {
-        input[i] = offset + static_cast<float>(i) * 0.25f;
+data::InputData MakeInput(float offset = 0.0F) {
+    data::InputData input;
+    input.sample_count = 32;
+    for (std::size_t i = 0; i < input.sample_count; ++i) {
+        input.samples[i] = offset + static_cast<float>(i) * 0.25F;
     }
     return input;
 }
 
-void VerifyScaled(const std::vector<data::InputSample>& input,
-                  const std::vector<data::OutputSample>& output,
-                  float factor) {
-    Require(output.size() == data::kOutputElementsPerWork,
-            "output transaction size mismatch");
-    Require(input.size() == output.size(), "template algorithm expects equal input/output size");
-    for (std::size_t i = 0; i < output.size(); ++i) {
-        const float expected = input[i] * factor;
-        if (std::abs(output[i] - expected) > 1.0e-6f) {
-            throw std::runtime_error("scaled output mismatch at element " + std::to_string(i));
-        }
+std::vector<std::byte> EncodeInput(const data::InputData& input,
+                                   sdk::FrameMetadata metadata = {17, 1234}) {
+    const std::size_t payload_bytes =
+        sdk::FrameCodec<data::InputData>::encoded_size(input);
+    std::vector<std::byte> payload(payload_bytes);
+    Require(sdk::FrameCodec<data::InputData>::encode(
+                input, cy::common::Span<std::byte>(payload.data(), payload.size())),
+            "输入 Codec 编码失败");
+    std::vector<std::byte> wire(sdk::WireFrameBytes(payload.size()));
+    Require(sdk::EncodeFrame(
+                cy::common::Span<const std::byte>(payload.data(), payload.size()),
+                metadata,
+                cy::common::Span<std::byte>(wire.data(), wire.size())),
+            "SDK 输入封帧失败");
+    return wire;
+}
+
+void Publish(fg::PortOut<std::byte>& source,
+             const std::byte* bytes,
+             std::size_t size) {
+    std::size_t offset = 0;
+    while (offset < size) {
+        auto span = source.reserve(size - offset);
+        Require(!span.empty(), "测试输入端发生意外背压");
+        std::memcpy(span.data(), bytes + offset, span.size());
+        offset += span.size();
+        span.commit(span.size());
     }
 }
 
-void TestSuccessfulTransaction() {
-    constexpr float kFactor = 2.0f;
-    Harness harness(
-        MakeProductionBlock(kFactor),
-        data::kInputElementsPerWork,
-        data::kOutputElementsPerWork,
-        data::kInputElementsPerWork * 2,
-        data::kOutputElementsPerWork * 2);
+std::vector<std::byte> Drain(fg::PortIn<std::byte>& sink) {
+    std::vector<std::byte> bytes(sink.available());
+    if (!bytes.empty()) {
+        Require(sink.peek_copy(
+                    0, cy::common::Span<std::byte>(bytes.data(), bytes.size())) ==
+                    bytes.size(),
+                "测试输出读取失败");
+        Require(sink.consume_exact(bytes.size()), "测试输出消费失败");
+    }
+    return bytes;
+}
 
+void VerifyOutput(const std::vector<std::byte>& wire,
+                  const data::InputData& input,
+                  float factor,
+                  sdk::FrameMetadata expected_metadata = {17, 1234}) {
+    const auto inspection = sdk::InspectFrame(
+        cy::common::Span<const std::byte>(wire.data(), wire.size()), wire.size());
+    Require(inspection.status == sdk::FrameParseStatus::CompleteFrame,
+            "输出不是完整合法帧");
+    Require(inspection.metadata.sequence_id == expected_metadata.sequence_id &&
+                inspection.metadata.timestamp_unix_nano ==
+                    expected_metadata.timestamp_unix_nano,
+            "输出元数据没有正确透传");
+    data::OutputData output;
+    Require(sdk::FrameCodec<data::OutputData>::decode(
+                cy::common::Span<const std::byte>(
+                    wire.data() + sdk::kFrameEnvelopeBytes,
+                    inspection.payload_bytes),
+                output),
+            "输出 Codec 解码失败");
+    Require(output.sample_count == input.sample_count, "输出样点数错误");
+    for (std::size_t i = 0; i < output.sample_count; ++i) {
+        const float expected = input.samples[i] * factor;
+        Require(std::abs(output.samples[i] - expected) < 1.0e-6F,
+                "输出数值错误，索引=" + std::to_string(i));
+    }
+}
+
+fg::ValueMap MakeParams(double factor, std::size_t maximum_wire_bytes) {
+    return {
+        {"factor", factor},
+        {"max_input_frame_bytes", static_cast<std::int64_t>(maximum_wire_bytes)},
+        {"max_output_frame_bytes", static_cast<std::int64_t>(maximum_wire_bytes)},
+    };
+}
+
+void TestCodecAndAlgorithm() {
     const auto input = MakeInput();
-    harness.publish(input);
-    const auto observation = harness.work_once();
-    Require(observation.succeeded, "complete input should produce one successful work");
-    Require(observation.consumed_input_elements == data::kInputElementsPerWork,
-            "successful work consumed the wrong input count");
-    Require(observation.produced_output_elements == data::kOutputElementsPerWork,
-            "successful work produced the wrong output count");
-    VerifyScaled(input, harness.drain_one_transaction(), kFactor);
+    const std::size_t payload_bytes =
+        sdk::FrameCodec<data::InputData>::encoded_size(input);
+    std::vector<std::byte> payload(payload_bytes);
+    Require(sdk::FrameCodec<data::InputData>::encode(
+                input, cy::common::Span<std::byte>(payload.data(), payload.size())),
+            "Codec 编码失败");
+    data::InputData decoded;
+    Require(sdk::FrameCodec<data::InputData>::decode(
+                cy::common::Span<const std::byte>(payload.data(), payload.size()),
+                decoded),
+            "Codec 解码失败");
+    Require(decoded.sample_count == input.sample_count, "Codec 样点数错误");
+    Require(!sdk::FrameCodec<data::InputData>::decode(
+                cy::common::Span<const std::byte>(
+                    payload.data(), payload.size() - 1),
+                decoded),
+            "Codec 接受了截断 Payload");
+
+    MyAlgorithm algorithm(sdk::Params(MakeParams(2.0, 8192)));
+    data::OutputData output;
+    Require(algorithm.work(input, output) == sdk::ProcessResult::Produced,
+            "强类型算法没有产生输出");
+    Require(output.samples[7] == input.samples[7] * 2.0F,
+            "强类型算法金标值错误");
 }
 
-void TestInsufficientInputRollback() {
-    Harness harness(
-        MakeProductionBlock(1.0),
-        data::kInputElementsPerWork,
-        data::kOutputElementsPerWork,
-        data::kInputElementsPerWork * 2,
-        data::kOutputElementsPerWork * 2);
+void TestEveryByteSplit() {
+    const auto input = MakeInput();
+    const auto wire = EncodeInput(input);
+    const std::size_t capacity = wire.size() * 2 + 17;
+    for (std::size_t split = 1; split < wire.size(); ++split) {
+        fg::PortOut<std::byte> source;
+        sdk::FrameAlgorithmAdapter<MyAlgorithm> adapter(MakeParams(3.0, capacity));
+        fg::PortIn<std::byte> sink;
+        fg::connect(source, adapter.in, capacity);
+        fg::connect(adapter.out, sink, capacity);
 
-    std::vector<data::InputSample> partial(data::kInputElementsPerWork - 1, 1.0f);
-    harness.publish(partial);
-    const std::size_t input_before = harness.input_available();
-    const auto observation = harness.work_once();
+        Publish(source, wire.data(), split);
+        const std::size_t available = adapter.in.available();
+        Require(!adapter.process_work(), "残帧错误触发了算法");
+        Require(adapter.in.available() == available, "残帧推进了输入游标");
+        Require(adapter.stats().frames_processed == 0, "残帧被计为已处理帧");
 
-    Require(!observation.succeeded, "insufficient input must not report success");
-    Require(observation.consumed_input_elements == 0,
-            "insufficient input must not be consumed");
-    Require(observation.produced_output_elements == 0,
-            "insufficient input must not produce output");
-    Require(harness.input_available() == input_before,
-            "insufficient input changed ring state");
-    Require(harness.output_available() == 0,
-            "insufficient input unexpectedly produced output");
+        Publish(source, wire.data() + split, wire.size() - split);
+        Require(adapter.process_work(), "完整帧没有推动 Adapter");
+        Require(adapter.stats().frames_processed == 1, "完整帧处理次数错误");
+        VerifyOutput(Drain(sink), input, 3.0F);
+    }
 }
 
-void TestOutputBackpressureRollback() {
-    Harness harness(
-        MakeProductionBlock(1.0),
-        data::kInputElementsPerWork,
-        data::kOutputElementsPerWork,
-        data::kInputElementsPerWork * 2,
-        data::kOutputElementsPerWork);
+void TestBackpressureRunsAlgorithmOnce() {
+    const auto input = MakeInput();
+    const auto wire = EncodeInput(input, {99, 5678});
+    const std::size_t output_capacity = wire.size() / 2;
+    fg::PortOut<std::byte> source;
+    sdk::FrameAlgorithmAdapter<MyAlgorithm> adapter(MakeParams(0.5, wire.size() * 2));
+    fg::PortIn<std::byte> sink;
+    fg::connect(source, adapter.in, wire.size() * 2);
+    fg::connect(adapter.out, sink, output_capacity);
 
-    const auto first = MakeInput();
-    harness.publish(first);
-    Require(harness.work_once().succeeded, "first work should fill the output ring");
-    Require(harness.output_writable() == 0, "output ring should be full");
+    Publish(source, wire.data(), wire.size());
+    Require(adapter.process_work(), "背压场景首次工作没有进展");
+    Require(adapter.has_pending_output(), "受阻输出未被保留");
+    Require(adapter.stats().frames_processed == 1, "算法执行次数错误");
+    Require(!adapter.process_work(), "输出满时不应报告进展");
+    Require(adapter.stats().frames_processed == 1, "背压导致算法重复执行");
 
-    const auto second = MakeInput(1000.0f);
-    harness.publish(second);
-    const std::size_t input_before = harness.input_available();
-    const std::size_t output_before = harness.output_available();
-    const auto blocked = harness.work_once();
-
-    Require(!blocked.succeeded, "full output ring must apply backpressure");
-    Require(blocked.consumed_input_elements == 0,
-            "Reader input must roll back when Writer cannot reserve output");
-    Require(blocked.produced_output_elements == 0,
-            "backpressured work must not commit partial output");
-    Require(harness.input_available() == input_before,
-            "backpressured work changed input availability");
-    Require(harness.output_available() == output_before,
-            "backpressured work changed output availability");
-
-    VerifyScaled(first, harness.drain_one_transaction(), 1.0f);
-    Require(harness.work_once().succeeded,
-            "rolled-back input should succeed after output is drained");
-    VerifyScaled(second, harness.drain_one_transaction(), 1.0f);
+    std::vector<std::byte> assembled;
+    while (adapter.has_pending_output() || sink.available() != 0) {
+        auto chunk = Drain(sink);
+        assembled.insert(assembled.end(), chunk.begin(), chunk.end());
+        if (adapter.has_pending_output()) {
+            Require(adapter.process_work(), "释放背压后输出没有继续排空");
+            Require(adapter.stats().frames_processed == 1,
+                    "排空输出时算法被重复执行");
+        }
+    }
+    VerifyOutput(assembled, input, 0.5F, {99, 5678});
 }
 
-void TestRingWrapAcrossTransactions() {
-    Harness harness(
-        MakeProductionBlock(0.5),
-        data::kInputElementsPerWork,
-        data::kOutputElementsPerWork,
-        data::kInputElementsPerWork * 2,
-        data::kOutputElementsPerWork * 2);
+void TestRingWrap() {
+    const auto input = MakeInput();
+    const auto wire = EncodeInput(input);
+    const std::size_t capacity = wire.size() + 17;
+    fg::PortOut<std::byte> source;
+    sdk::FrameAlgorithmAdapter<MyAlgorithm> adapter(MakeParams(1.0, capacity));
+    fg::PortIn<std::byte> sink;
+    fg::connect(source, adapter.in, capacity);
+    fg::connect(adapter.out, sink, capacity);
 
-    for (std::size_t iteration = 0; iteration < 7; ++iteration) {
-        const auto input = MakeInput(static_cast<float>(iteration) * 100.0f);
-        harness.publish(input);
-        Require(harness.work_once().succeeded,
-                "aligned ring transaction failed while cursors wrapped");
-        VerifyScaled(input, harness.drain_one_transaction(), 0.5f);
+    for (std::size_t frame = 0; frame < 8; ++frame) {
+        Publish(source, wire.data(), wire.size());
+        Require(adapter.process_work(), "环形折返场景处理失败");
+        std::vector<std::byte> assembled;
+        while (adapter.has_pending_output() || sink.available() != 0) {
+            auto chunk = Drain(sink);
+            assembled.insert(assembled.end(), chunk.begin(), chunk.end());
+            if (adapter.has_pending_output()) {
+                Require(adapter.process_work(), "折返输出没有继续排空");
+            }
+        }
+        VerifyOutput(assembled, input, 1.0F);
     }
 }
 
 } // namespace
 
 int main() {
-    TestSuccessfulTransaction();
-    TestInsufficientInputRollback();
-    TestOutputBackpressureRollback();
-    TestRingWrapAcrossTransactions();
+    TestCodecAndAlgorithm();
+    TestEveryByteSplit();
+    TestBackpressureRunsAlgorithmOnce();
+    TestRingWrap();
     std::cout << "qa_algorithm_block passed\n";
     return 0;
 }

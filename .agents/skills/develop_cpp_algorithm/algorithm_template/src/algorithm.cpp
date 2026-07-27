@@ -12,24 +12,14 @@ MyAlgorithm::MyAlgorithm(const cycore::sdk::Params& params)
     }
 }
 
-bool MyAlgorithm::work(
-    cycore::sdk::Reader<my_block_data::InputSample>& in,
-    cycore::sdk::Writer<my_block_data::OutputSample>& out) {
-    auto input = in.read_matrix(my_block_data::kInputRows, my_block_data::kInputCols);
-    if (!input) {
-        return false;
+cycore::sdk::ProcessResult MyAlgorithm::work(const InputData& input,
+                                             OutputData& output) noexcept {
+    if (input.sample_count == 0 || input.sample_count > my_block_data::kMaxSamples) {
+        return cycore::sdk::ProcessResult::Drop;
     }
-
-    auto output = out.reserve_matrix(my_block_data::kOutputRows, my_block_data::kOutputCols);
-    if (!output) {
-        return false;
+    output.sample_count = input.sample_count;
+    for (std::size_t i = 0; i < input.sample_count; ++i) {
+        output.samples[i] = input.samples[i] * static_cast<float>(factor_);
     }
-
-    for (std::size_t row = 0; row < input->rows(); ++row) {
-        for (std::size_t col = 0; col < input->cols(); ++col) {
-            (*output)(row, col) =
-                (*input)(row, col) * static_cast<my_block_data::OutputSample>(factor_);
-        }
-    }
-    return true;
+    return cycore::sdk::ProcessResult::Produced;
 }

@@ -5,8 +5,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(BUILD_TESTING "Build complete-Block QA and plugin ABI smoke tests" OFF)
-option(BUILD_BENCHMARKS "Build the complete-Block throughput benchmark" OFF)
+option(BUILD_TESTING "Build frame-Block QA and plugin ABI smoke tests" OFF)
+option(BUILD_BENCHMARKS "Build the frame-Block throughput benchmark" OFF)
 option(ALGORITHM_ENABLE_NATIVE_OPTIMIZATION
        "Enable -march=native for same-host Release benchmarking" OFF)
 option(ALGORITHM_ENABLE_IPO "Enable interprocedural optimization when supported" OFF)
@@ -26,7 +26,6 @@ function(configure_algorithm_target target)
         ${CMAKE_CURRENT_SOURCE_DIR}/../../../../cpp/sdk/include
         ${CMAKE_CURRENT_SOURCE_DIR}/sdk/include
         ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/test
     )
 
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

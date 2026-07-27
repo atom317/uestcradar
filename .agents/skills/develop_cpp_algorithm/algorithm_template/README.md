@@ -10,7 +10,8 @@ algorithm_template/
 ├── CMakeLists.txt
 ├── Dockerfile.build_cross
 ├── include/
-│   ├── data.h                  # 输入输出类型和每次处理的元素数
+│   ├── data.h                  # 算法自定义的 InputData/OutputData
+│   ├── codec.h                 # 业务 Payload 编解码
 │   └── algorithm.h             # 算法类声明
 ├── src/
 │   ├── algorithm.cpp           # 算法实现
@@ -19,45 +20,61 @@ algorithm_template/
 │   ├── qa_algorithm_block.cpp  # 正确性测试
 │   ├── qa_plugin_load.cpp      # 真实 .so 加载测试
 │   └── bm_algorithm_block.cpp  # 性能测试
-└── sdk/include/                # SDK 头文件；复用公共 block_test_harness.h
+└── sdk/include/                # 只读 Cycore SDK 头文件
 ```
 
-| 文件 | 是否修改 |
-| --- | --- |
-| `include/data.h` | 修改：输入输出类型和每次处理的元素数 |
-| `include/algorithm.h` | 修改：算法类声明 |
-| `src/algorithm.cpp` | 修改：算法实现 |
-| `src/algorithm_block.cpp` | 修改：插件标识和导出类型 |
-| `test/qa_algorithm_block.cpp` | 修改：正确性测试数据 |
-| `test/qa_plugin_load.cpp` | 修改：真实 `.so` 加载测试数据 |
-| `test/bm_algorithm_block.cpp` | 修改：性能测试配置 |
-| `CMakeLists.txt` | 通常不改；新增依赖或修改插件目标名时才改 |
-| `Dockerfile.build_cross` | 通常不改 |
-| `cpp/sdk/include/block_test_harness.h` | 公共测试基础设施；算子不复制或修改 |
-| `cpp/sdk/include/block_benchmark_runner.h` | 公共 Benchmark Runner；算子不复制或修改 |
-| `sdk/include/**` | 禁止修改；公共 Harness 位于仓库 `cpp/sdk/include` |
+| 文件                            | 是否修改                                 |
+| ------------------------------- | ---------------------------------------- |
+| `include/data.h`              | 修改：算法自定义的输入输出强类型         |
+| `include/codec.h`             | 修改：业务 Payload 编解码与严格校验      |
+| `include/algorithm.h`         | 修改：算法类声明                         |
+| `src/algorithm.cpp`           | 修改：算法实现                           |
+| `src/algorithm_block.cpp`     | 修改：插件标识和导出类型                 |
+| `test/qa_algorithm_block.cpp` | 修改：正确性测试数据                     |
+| `test/qa_plugin_load.cpp`     | 修改：真实`.so` 加载测试数据           |
+| `test/bm_algorithm_block.cpp` | 修改：性能测试配置                       |
+| `CMakeLists.txt`              | 通常不改；新增依赖或修改插件目标名时才改 |
+| `Dockerfile.build_cross`      | 通常不改                                 |
+| `sdk/include/**`              | 禁止修改；只通过 Cycore SDK 同步更新     |
 
 同时禁止修改算法构造函数、`work()` 生产接口、插件导出符号、接口版本和注册方式，也
 不要为测试创建另一套算法入口。
 
 ## 数据契约
 
-在 `include/data.h` 中定义 `InputSample`、`OutputSample` 和每次 `work()` 的输入输出
-元素数。模板默认均为 `1 × 1024`：
+在 `include/data.h` 中定义算法自己的 `InputData` 和 `OutputData`。它们可以是算法
+开发者定义的任意业务结构体，SDK 不规定字段名称、维度、元素类型、容器类型或内存
+布局，也不要求结构体可平凡复制。当前 Adapter 只要求类型可以默认构造，并存在对应的
+`FrameCodec<T>`。
+
+例如，距离-多普勒算法可以直接把脉冲压缩结果作为 `InputData`，把 RD 图作为
+`OutputData`：
 
 ```cpp
-using InputSample = float;
-using OutputSample = float;
+// 脉冲压缩结果：纯业务语义定义，不包含 SDK 传输帧头。
+struct PulseCompressionFrame {
+    std::uint32_t pulses;               // 脉冲数 M，例如 64
+    std::uint32_t samples_per_pulse;    // 单脉冲采样点数 N，例如 4096
+    std::vector<cy::common::CS16> payload;
+    // payload.size() == pulses * samples_per_pulse
+};
 
-constexpr std::size_t kInputElementsPerWork = 1024;
-constexpr std::size_t kOutputElementsPerWork = 1024;
+// RD 图：纯业务语义定义，不包含 SDK 传输帧头。
+struct RDMapFrame {
+    std::uint32_t rows;                 // Doppler Bins，即脉冲数 M
+    std::uint32_t cols;                 // Range Bins，即采样点数 N
+    std::vector<float> payload;
+    // payload.size() == rows * cols
+};
+
+using InputData = PulseCompressionFrame;
+using OutputData = RDMapFrame;
 ```
 
-输入和输出可以类型不同、数量不同。样本类型必须可直接复制，可使用 `CS16`、`CF32`、
-`float`、`int16_t`、`int32_t`、`uint8_t` 或 `std::byte`。
-
-rows、cols、channels、pulses 等维度定义为算法常量或通过 `Params` 传入，不需要把
-Matrix、Cube 定义成外部测试类型。
+在 `include/codec.h` 中分别实现 `FrameCodec<InputData>` 和
+`FrameCodec<OutputData>`。包含 `std::vector` 的对象不能通过 `memcpy` 直接传输；Codec
+应把维度字段和容器元素编码为连续业务 Payload，解码时检查乘法溢出、总字节数以及
+`payload.size()` 是否与维度严格一致。
 
 ## 算法开发规范
 
@@ -68,11 +85,13 @@ Matrix、Cube 定义成外部测试类型。
 ```cpp
 class MyAlgorithm {
 public:
+    using InputData = cycore::algorithm::my_block::InputData;
+    using OutputData = cycore::algorithm::my_block::OutputData;
+
     explicit MyAlgorithm(const cycore::sdk::Params& params);
 
-    bool work(
-        cycore::sdk::Reader<cycore::algorithm::my_block::InputSample>& in,
-        cycore::sdk::Writer<cycore::algorithm::my_block::OutputSample>& out);
+    cycore::sdk::ProcessResult work(const InputData& input,
+                                    OutputData& output) noexcept;
 };
 ```
 
@@ -83,28 +102,22 @@ public:
 
 每次 `work()` 完成一帧处理：
 
-1. 使用 Reader 读取输入。
-2. 使用 Writer 申请输出。
-3. 完成计算并写满输出。
-4. 成功返回 `true`；输入不足、输出空间不足或本帧失败时返回 `false`。
+1. 校验业务字段和维度；
+2. 直接读取完整 `InputData`；
+3. 将结果写入预分配的 `OutputData`；
+4. 返回 `Produced`、`Retry` 或 `Drop`。
 
-Reader 可使用 `read()`、`read_available()`、`read_matrix()`、`read_cube()`；
-Writer 可使用 `reserve()`、`reserve_available()`、`reserve_matrix()`、
-`reserve_cube()`。`std::byte` 端口可使用 SDK RawBytes 接口。不要手动提交输出或
-消费输入。
+算法不得解析 SDK Envelope、操作底层字节流、手动消费输入、手动封包或透传元数据。
 
 ### 插件导出
 
 `src/algorithm_block.cpp` 只负责生产插件导出：
 
 ```cpp
-CYCORE_EXPORT_ALGORITHM(
+CYCORE_EXPORT_FRAME_ALGORITHM(
     "my_plugin",
     "algorithm.my_block",
-    MyAlgorithm,
-    cycore::algorithm::my_block::InputSample,
-    cycore::algorithm::my_block::OutputSample
-)
+    MyAlgorithm)
 ```
 
 插件名、CMake 目标名、生成的 `.so` 文件名、Block key、部署配置和
@@ -153,9 +166,8 @@ docker run --rm \
 
 ## 正确性测试
 
-在 `test/qa_algorithm_block.cpp` 中填写真实 `Params`、每次输入/输出元素数、输入
-数据、期望输出和缓冲容量。在 `test/qa_plugin_load.cpp` 中填写插件名、Block key
-和一帧验证数据。
+在 `test/qa_algorithm_block.cpp` 中填写真实 `Params`、业务输入、期望输出和最大线帧
+字节数。在 `test/qa_plugin_load.cpp` 中填写插件名、Block key 和一帧验证数据。
 
 前期可在本机执行：
 
@@ -167,8 +179,9 @@ cmake --build build-test -j"$(nproc)"
 ctest --test-dir build-test --output-on-failure
 ```
 
-测试必须通过数值正确性、输入不足、输出阻塞和真实 `.so` 加载检查。最终交付前，还
-必须在 ARM64 目标环境运行交叉编译出的：
+测试必须通过 Codec、数值正确性、逐字节残帧、环形折返、输出背压、元数据透传和
+真实 `.so` 加载检查。动态插件的物理输入输出端口必须是 `std::byte`。最终交付前，
+还必须在 ARM64 目标环境运行交叉编译出的：
 
 ```bash
 ./build-cross/qa_algorithm_block
@@ -179,35 +192,29 @@ ctest --test-dir build-test --output-on-failure
 
 ## 性能测试
 
-在 `test/bm_algorithm_block.cpp` 中，Benchmark 开发流程缩减为三步，算法开发者只修改 `MakeBenchmarkCases()`。公共 Runner 自动创建生产 BlockModel、连接 Harness、生成 Ring Buffer 容量、预热、计时、验证 N-to-M 事务、统计并打印结果。
+`test/bm_algorithm_block.cpp` 测量完整的
+`std::byte → FrameAlgorithmAdapter → std::byte` 路径，包括拆帧、Codec、算法计算、
+封包和输出重组。
 
-### 第一步：写 Params
+### 第一步：写 Params 和业务帧
 
-填写创建生产 Block 所需的 ValueMap，参数名称必须与算法构造函数一致。
+填写创建生产 Block 所需的 `ValueMap`，并构造一个符合 Codec 契约的代表性输入帧。
 
-### 第二步：填写 N/M
+### 第二步：设置最大线帧字节数
 
-* `N` = 一次成功 `work()` 完整消费的输入元素数；
-* `M` = 一次成功 `work()` 完整提交的输出元素数；
+`max_input_frame_bytes`、`max_output_frame_bytes` 和测试连接容量必须覆盖代表性输入输出
+线帧。容量无需是帧长的整数倍。
 
-明确允许 `N != M`，不得根据 Matrix/Cube 名称推导，必须根据生产算法真实 Reader/Writer 契约填写。
+### 第三步：消费输出结果
 
-### 第三步：必要时覆盖输入帧
-
-默认不填写，Runner 自动使用：
-
-```cpp
-std::vector<InputSample>(N, InputSample{})
-```
-
-只有确实需要特定输入分布时才覆盖，并保证元素数严格等于 `N`。
+计时循环必须读取并使用输出结果，防止编译器删除算法计算。保留命令行的测量时长、
+预热次数、最少调用次数和 case 过滤参数。
 
 ### 规则与约束说明
 
-* **数据类型约束**：`InputSample` 必须可默认构造且可平凡复制。
-* **容量自动生成**：Ring Buffer 容量由 Runner 自动计算与分配，不属于开发步骤。
-* **实时余量**：目标输入速率 `target_input_mitems_per_second` 为可选参数，只用于计算实时余量（Realtime Headroom）。
-* **开发红线**：严禁修改 Runner、Harness、计时循环、事务校验、指标公式和打印主体。
+* **测量口径**：输出 frames/s、Payload GiB/s 和平均单帧延迟。
+* **正确性**：Benchmark 启动前必须先通过全部 QA。
+* **开发红线**：不得把纯算法循环结果冒充完整 Adapter 吞吐量。
 
 前期可在本机运行 Release Benchmark：
 
@@ -231,7 +238,7 @@ cmake --build build-benchmark -j"$(nproc)"
 ./build-cross/bm_algorithm_block 3000 500 1000 [case_filter]
 ```
 
-结果包含成功/失败调用数、延迟、输入/输出吞吐和带宽，表示当前目标机上完整算法 Block 的饱和处理上限，不代表设备、网络、磁盘或整套系统性能。
+结果包含调用数、帧吞吐、Payload 带宽和平均延迟，表示当前目标机上完整算法 Block 的饱和处理上限，不代表设备、网络、磁盘或整套系统性能。
 
 ## 交付产物
 

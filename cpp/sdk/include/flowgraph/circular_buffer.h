@@ -4,8 +4,11 @@
 #include "buffer.h"
 #include "span.h"
 
+#include <common/span.h>
+
 #include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -308,6 +311,70 @@ public:
                 read_cursor,
                 &State::consume_reader_span,
                 &State::rollback_reader_span);
+        }
+
+        std::size_t peek_copy(std::size_t offset,
+                              cy::common::Span<T> destination) const {
+            ensure_valid();
+            if (destination.empty()) {
+                return 0;
+            }
+            if (destination.data() == nullptr) {
+                throw std::invalid_argument("CircularBuffer peek destination is null");
+            }
+
+            bool expected = false;
+            if (!reader_->pending.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+                throw BufferError("CircularBuffer reader already has an outstanding operation");
+            }
+
+            const std::uint64_t read_cursor = reader_->cursor.load(std::memory_order_acquire);
+            const std::uint64_t write_cursor = state_->write_cursor.load(std::memory_order_acquire);
+            const std::uint64_t produced = write_cursor - read_cursor;
+            const std::size_t readable =
+                static_cast<std::size_t>(std::min<std::uint64_t>(produced, state_->capacity));
+            if (offset >= readable) {
+                state_->release_reader_span(reader_.get());
+                return 0;
+            }
+
+            const std::size_t copied = std::min(destination.size(), readable - offset);
+            const std::size_t index =
+                static_cast<std::size_t>(read_cursor + static_cast<std::uint64_t>(offset)) &
+                state_->mask;
+            const std::size_t first = std::min(copied, state_->capacity - index);
+            std::memcpy(destination.data(), state_->storage.data() + index, first * sizeof(T));
+            if (first < copied) {
+                std::memcpy(destination.data() + first,
+                            state_->storage.data(),
+                            (copied - first) * sizeof(T));
+            }
+            state_->release_reader_span(reader_.get());
+            return copied;
+        }
+
+        bool consume_exact(std::size_t count) {
+            ensure_valid();
+
+            bool expected = false;
+            if (!reader_->pending.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+                throw BufferError("CircularBuffer reader already has an outstanding operation");
+            }
+
+            const std::uint64_t read_cursor = reader_->cursor.load(std::memory_order_acquire);
+            const std::uint64_t write_cursor = state_->write_cursor.load(std::memory_order_acquire);
+            const std::uint64_t produced = write_cursor - read_cursor;
+            const std::size_t readable =
+                static_cast<std::size_t>(std::min<std::uint64_t>(produced, state_->capacity));
+            if (count > readable) {
+                state_->release_reader_span(reader_.get());
+                return false;
+            }
+
+            reader_->cursor.store(read_cursor + static_cast<std::uint64_t>(count),
+                                  std::memory_order_release);
+            state_->release_reader_span(reader_.get());
+            return true;
         }
 
         std::size_t available() const {

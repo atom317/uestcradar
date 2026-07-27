@@ -146,6 +146,21 @@ public:
         return reader_.get(n);
     }
 
+    std::size_t peek_copy(std::size_t offset,
+                          cy::common::Span<T> destination) const {
+        if (!connected()) {
+            throw std::logic_error("PortIn is not connected");
+        }
+        return reader_.peek_copy(offset, destination);
+    }
+
+    bool consume_exact(std::size_t count) {
+        if (!connected()) {
+            throw std::logic_error("PortIn is not connected");
+        }
+        return reader_.consume_exact(count);
+    }
+
     DynamicPort dynamic_port() override {
         return DynamicPort(
             name(), direction(), port_type(), type_info(), std::string(type_key()),

@@ -109,8 +109,8 @@ public:
         state_ = lifecycle::State::RUNNING;
     }
 
-    void work() {
-        static_cast<Derived*>(this)->process_work();
+    bool work() {
+        return static_cast<Derived*>(this)->process_work();
     }
 
     lifecycle::State state() const noexcept { return state_; }
@@ -122,7 +122,7 @@ protected:
     void on_stop()      {}
     void on_pause()     {}
     void on_resume()    {}
-    void process_work() {}
+    bool process_work() { return true; }
 
 private:
     lifecycle::State state_ = lifecycle::State::IDLE;

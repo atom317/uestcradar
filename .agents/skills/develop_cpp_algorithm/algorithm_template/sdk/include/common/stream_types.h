@@ -2,6 +2,7 @@
 #pragma once
 
 #include <common/i_data_stream.h>
+#include <common/stream_metadata.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -65,6 +66,7 @@ struct StreamFrameEvent {
     uint64_t timestamp_unix_nano;
     cy::common::DataType data_type = cy::common::DataType::RawBytes;
     std::vector<std::byte> data;
+    StreamMetadataPtr metadata;
 };
 
 } // namespace common

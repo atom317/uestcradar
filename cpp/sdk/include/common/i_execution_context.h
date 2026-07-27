@@ -8,11 +8,31 @@
 
 namespace cy::common {
 
+enum class ReaderPurpose {
+    Flowgraph,
+    Capture,
+};
+
+enum class ReaderStopMode {
+    Discard,
+    Drain,
+};
+
 class IExecutionContext {
 public:
     virtual ~IExecutionContext() = default;
 
     virtual std::shared_ptr<IDataReader> get_reader(const std::string& ref) const = 0;
+    virtual std::shared_ptr<IDataReader> get_reader(
+        const std::string& ref, ReaderPurpose purpose) const {
+        (void)purpose;
+        return get_reader(ref);
+    }
+    virtual void deactivate_reader(
+        ReaderPurpose purpose, ReaderStopMode mode = ReaderStopMode::Discard) const {
+        (void)purpose;
+        (void)mode;
+    }
     virtual std::shared_ptr<IDataWriter> get_writer(const std::string& ref) const = 0;
 };
 

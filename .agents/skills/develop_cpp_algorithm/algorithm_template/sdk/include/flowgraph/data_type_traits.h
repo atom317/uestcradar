@@ -13,6 +13,16 @@ template <typename T>
 struct DataTypeTraits;
 
 template <>
+struct DataTypeTraits<std::int16_t> {
+    static constexpr cy::common::DataType value = cy::common::DataType::Int16;
+};
+
+template <>
+struct DataTypeTraits<std::int32_t> {
+    static constexpr cy::common::DataType value = cy::common::DataType::Int32;
+};
+
+template <>
 struct DataTypeTraits<cy::common::CS16> {
     static constexpr cy::common::DataType value = cy::common::DataType::CS16;
 };

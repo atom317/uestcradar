@@ -51,7 +51,7 @@ public:
     void stop() override { block_.stop(); }
     void pause() override { block_.pause(); }
     void resume() override { block_.resume(); }
-    void work() override { block_.work(); }
+    bool work() override { return block_.work(); }
 
     void* raw_block() noexcept override { return &block_; }
     const void* raw_block() const noexcept override { return &block_; }

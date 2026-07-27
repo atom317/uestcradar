@@ -29,6 +29,9 @@ constexpr std::size_t kDefaultProbeMaxBytes = 64 * 1024;
 template <typename T>
 class Probe final : public cy::common::IProbe {
 public:
+    // 💡 NOTE: The `frame_size` (measured in elements of type T) specified in the YAML configuration
+    // should align with the size calculated from metadata parameters (e.g., points * channels)
+    // to avoid data truncation before transmission.
     Probe(std::string topic,
           std::size_t frame_size,
           std::size_t max_elements = detail::kDefaultProbeMaxElements,
@@ -107,7 +110,8 @@ private:
 
 class ProbeRegistry final : public cy::common::IProbeProvider {
 public:
-    void AddProbe(std::shared_ptr<cy::common::IProbe> probe) {
+    void AddProbe(std::shared_ptr<cy::common::IProbe> probe,
+                  cycore::du::common::StreamMetadataPtr metadata = {}) {
         if (!probe) {
             throw std::invalid_argument("probe registry cannot add null probe");
         }
@@ -115,6 +119,9 @@ public:
         const std::string topic = probe->topic();
         if (!probes_.emplace(topic, std::move(probe)).second) {
             throw std::invalid_argument("duplicate probe topic: " + topic);
+        }
+        if (metadata) {
+            metadata_.emplace(topic, std::move(metadata));
         }
     }
 
@@ -137,9 +144,19 @@ public:
         return topics;
     }
 
+    cycore::du::common::StreamMetadataPtr GetProbeMetadata(const std::string& topic) const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = metadata_.find(topic);
+        if (it == metadata_.end()) {
+            return {};
+        }
+        return it->second;
+    }
+
 private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::shared_ptr<cy::common::IProbe>> probes_;
+    std::unordered_map<std::string, cycore::du::common::StreamMetadataPtr> metadata_;
 };
 
 } // namespace cy::flowgraph

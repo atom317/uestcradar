@@ -3,6 +3,7 @@
 
 #include <common/i_data_stream.h>
 #include <common/span.h>
+#include <common/stream_metadata.h>
 
 #include <cstddef>
 #include <memory>
@@ -30,6 +31,10 @@ public:
 
     virtual std::shared_ptr<IProbe> GetProbe(const std::string& topic) const = 0;
     virtual std::vector<std::string> ListProbeTopics() const = 0;
+    virtual cycore::du::common::StreamMetadataPtr GetProbeMetadata(const std::string& topic) const {
+        (void)topic;
+        return {};
+    }
 };
 
 } // namespace cy::common

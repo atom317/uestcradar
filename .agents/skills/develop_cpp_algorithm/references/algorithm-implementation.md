@@ -89,7 +89,37 @@ constexpr std::size_t Index(std::size_t channel,
 
 ---
 
-## 5. YAML 完整配置规范
+## 5. Benchmark 规范
+
+算法 Benchmark 使用 SDK 的通用 Harness：
+
+```cpp
+#include <cycore_benchmark_harness.h>
+#include "algorithm.h"
+
+CYCORE_REGISTER_BENCHMARK(
+    MyAlgorithm,
+    [](MyAlgorithm::InputData& input) {
+        // 只构造一帧有代表性的强类型业务输入。
+    });
+```
+
+开发者不得在 Benchmark 中手写 `PortIn` / `PortOut`、`connect`、Envelope
+封包、`peek_copy`、`consume_exact`、调度循环、`std::chrono` 或吞吐公式。
+Harness 自动构建 `std::byte → FrameAlgorithmAdapter → std::byte` 完整链路，
+校验输出 `sequence_id`，解码并消费输出，报告 frames/s、
+payload_gib_per_s、average_latency_us、framework_allocations 和 checksum。
+
+如算法构造依赖非默认参数，可在算法类型上提供：
+
+```cpp
+static cy::flowgraph::ValueMap benchmark_params();
+```
+
+稳态测量区间要求 `framework_allocations == 0`。当前计数覆盖完整事务，因而也会发现
+算法自身的逐帧堆分配。
+
+## 6. YAML 完整配置规范
 
 算子参数仍在 `blocks` 中配置，同时为 Adapter 指定允许的最大输入输出线帧字节数：
 

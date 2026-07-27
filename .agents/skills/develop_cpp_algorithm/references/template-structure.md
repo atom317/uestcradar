@@ -10,7 +10,7 @@ algorithm_template/
 ├── include/algorithm.h         # 强类型算法接口
 ├── src/algorithm.cpp           # 算法实现
 ├── src/algorithm_block.cpp     # 帧级插件导出宏
-├── test/                       # 完整帧 QA、插件加载和 Benchmark
+├── test/                       # 完整帧 QA、插件加载和一键注册 Benchmark
 └── sdk/include/                # 只读 Cycore SDK 头文件
 ```
 
@@ -27,3 +27,6 @@ algorithm_template/
 
 > [!IMPORTANT]
 > 严禁手动修改模板里的 `sdk/include` 目录内容。
+
+`test/bm_algorithm_block.cpp` 只填写 `CYCORE_REGISTER_BENCHMARK` 的强类型
+`InputData` 准备 Lambda，不得复制底层流图驱动代码。

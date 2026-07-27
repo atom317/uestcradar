@@ -28,7 +28,7 @@ public:
     virtual void stop() = 0;
     virtual void pause() = 0;
     virtual void resume() = 0;
-    virtual void work() = 0;
+    virtual bool work() = 0;
 
     virtual void* raw_block() noexcept = 0;
     virtual const void* raw_block() const noexcept = 0;

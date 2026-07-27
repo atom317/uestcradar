@@ -196,24 +196,36 @@ ctest --test-dir build-test --output-on-failure
 `std::byte → FrameAlgorithmAdapter → std::byte` 路径，包括拆帧、Codec、算法计算、
 封包和输出重组。
 
-### 第一步：写 Params 和业务帧
+开发者只需使用 `CYCORE_REGISTER_BENCHMARK` 填写一帧强类型输入：
 
-填写创建生产 Block 所需的 `ValueMap`，并构造一个符合 Codec 契约的代表性输入帧。
+```cpp
+#include <cycore_benchmark_harness.h>
+#include "algorithm.h"
 
-### 第二步：设置最大线帧字节数
+CYCORE_REGISTER_BENCHMARK(
+    MyAlgorithm,
+    [](MyAlgorithm::InputData& input) {
+        input.sample_count = cycore::algorithm::my_block::kMaxSamples;
+        // 填充代表性业务数据……
+    });
+```
 
-`max_input_frame_bytes`、`max_output_frame_bytes` 和测试连接容量必须覆盖代表性输入输出
-线帧。容量无需是帧长的整数倍。
+Harness 自动完成 Port 和连接创建、SDK Envelope 编码、事务调度、输出完整帧解析、
+`sequence_id` 校验、输出解码与消费，以及计时和指标计算。算法 Benchmark 中禁止
+手写 `PortIn` / `PortOut`、`connect`、`peek_copy`、`consume_exact`、
+`std::chrono` 和吞吐公式。
 
-### 第三步：消费输出结果
-
-计时循环必须读取并使用输出结果，防止编译器删除算法计算。保留命令行的测量时长、
-预热次数、最少调用次数和 case 过滤参数。
+若算法构造依赖非默认参数，在算法类中提供
+`static cy::flowgraph::ValueMap benchmark_params()`；Harness 会自动读取，并根据
+实际输入输出线帧提升 `max_input_frame_bytes`、`max_output_frame_bytes` 和连接容量。
 
 ### 规则与约束说明
 
-* **测量口径**：输出 frames/s、Payload GiB/s 和平均单帧延迟。
+* **测量口径**：输出 frames/s、Payload GiB/s、平均单帧延迟、稳态分配次数和
+  checksum。
 * **正确性**：Benchmark 启动前必须先通过全部 QA。
+* **零分配门禁**：`framework_allocations` 非零时程序返回状态码 `2`。该计数覆盖完整
+  稳态事务，也会发现算法自身的逐帧堆分配。
 * **开发红线**：不得把纯算法循环结果冒充完整 Adapter 吞吐量。
 
 前期可在本机运行 Release Benchmark：
@@ -232,13 +244,14 @@ cmake --build build-benchmark -j"$(nproc)"
 ./build-cross/bm_algorithm_block
 ```
 
-需要更长测试时可传入最短测量毫秒数、预热次数和最少正式调用次数；第四个可选参数按 case 名称过滤：
+需要更长测试时可传入最短测量毫秒数、预热次数和最少正式调用次数：
 
 ```bash
-./build-cross/bm_algorithm_block 3000 500 1000 [case_filter]
+./build-cross/bm_algorithm_block 3000 500 1000
 ```
 
-结果包含调用数、帧吞吐、Payload 带宽和平均延迟，表示当前目标机上完整算法 Block 的饱和处理上限，不代表设备、网络、磁盘或整套系统性能。
+结果表示当前目标机上完整算法 Block 的饱和处理上限，不代表设备、网络、磁盘或整套
+系统性能。
 
 ## 交付产物
 

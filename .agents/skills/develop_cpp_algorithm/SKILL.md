@@ -14,7 +14,8 @@ description: 指导 Agent 基于模板脚手架，以“格式制定 → 空壳�
 graph TD
     A["阶段一: 制定输入输出格式<br/>(对齐上下游已有契约)"] --> B["阶段二: 编写空壳算子联调<br/>(验证流图拓扑网络连接)"]
     B --> C["阶段三: 算法实现与闭环自检<br/>(算法编写与静态沙盒自检)"]
-    C --> D["阶段四: 算法实际物理部署<br/>(引用 cpp_algorithm_ops 进行安全部署)"]
+    C --> D["阶段四: Benchmark 基线评估<br/>(一键注册完整帧链路基准)"]
+    D --> E["阶段五: 算法实际物理部署<br/>(引用 cpp_algorithm_ops 进行安全部署)"]
 ```
 
 ### 📂 阶段一：制定数据格式 (I/O Specification)
@@ -37,7 +38,17 @@ graph TD
 2. **沙盒自检**：在测试主程序中直接实例化静态测试 Block（`SimSource` / `SimSink`）组成仿真流图，对输出结果进行严苛的 Epsilon 理论精度与通道隔离度 assert断言。
    *详细模板与自检规范请参阅子指南：[3. 算法实现与自检规范](references/algorithm-implementation.md)*
 
-### 📂 阶段四：算法实际物理部署 (Actual Deployment)
+### 📂 阶段四：Benchmark 基线评估
+
+全部 QA 通过后，使用 `<cycore_benchmark_harness.h>` 和
+`CYCORE_REGISTER_BENCHMARK` 注册完整帧链路基准。算法开发者只负责构造强类型
+`InputData`；Port、连接、SDK Envelope、调度、输出消费、计时和指标计算全部由
+Harness 完成。
+
+Harness 自动输出 frames/s、Payload GiB/s、平均延迟、稳态分配次数及 checksum。
+具体写法见 [算法实现与自检规范](references/algorithm-implementation.md)。
+
+### 📂 阶段五：算法实际物理部署 (Actual Deployment)
 
 算法插件的分布式多节点同步、Docker隔离编译、前置测试熔断自检以及容器热重启，已由专属的运维技能包统一接管：
 

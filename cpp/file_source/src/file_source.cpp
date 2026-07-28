@@ -40,18 +40,12 @@ std::uint64_t InitialSequence(const cy::flowgraph::ValueMap& params) {
 
 FileSource::FileSource(const cy::flowgraph::ValueMap& params)
     : file_path_(RequiredPath(params)),
-      configured_pulses_(PositiveSize(params, "pulses")),
-      samples_per_pulse_(PositiveSize(params, "samples_per_pulse")),
+      configured_points_(PositiveSize(params, "points")),
       next_sequence_id_(InitialSequence(params)) {
-    if (configured_pulses_ > std::numeric_limits<std::uint32_t>::max() ||
-        samples_per_pulse_ > std::numeric_limits<std::uint32_t>::max()) {
-        throw std::overflow_error("IQ frame dimensions exceed uint32");
+    if (configured_points_ > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::overflow_error("IQ frame points exceed uint32");
     }
-    if (configured_pulses_ >
-        std::numeric_limits<std::size_t>::max() / samples_per_pulse_) {
-        throw std::overflow_error("IQ frame element count overflows size_t");
-    }
-    maximum_elements_ = configured_pulses_ * samples_per_pulse_;
+    maximum_elements_ = configured_points_;
     if (maximum_elements_ >
         (std::numeric_limits<std::size_t>::max() - sizeof(IQFrameHeader)) /
             sizeof(cy::common::CS16)) {
@@ -83,16 +77,10 @@ FileSource::FileSource(const cy::flowgraph::ValueMap& params)
     }
     const std::uint64_t elements =
         file_bytes / sizeof(cy::common::CS16);
-    if (elements % samples_per_pulse_ != 0) {
-        throw std::invalid_argument(
-            "IQ .bin does not contain an integer number of pulses");
+    if (elements > std::numeric_limits<std::size_t>::max()) {
+        throw std::overflow_error("IQ .bin point count overflows size_t");
     }
-    if (elements / samples_per_pulse_ >
-        std::numeric_limits<std::size_t>::max()) {
-        throw std::overflow_error("IQ .bin pulse count overflows size_t");
-    }
-    total_pulses_ =
-        static_cast<std::size_t>(elements / samples_per_pulse_);
+    total_points_ = static_cast<std::size_t>(elements);
 
     file_.clear();
     file_.seekg(0, std::ios::beg);
@@ -130,29 +118,27 @@ bool FileSource::process_work() {
 
     if (pending_offset_ == pending_wire_bytes_) {
         ++stats_.frames_emitted;
-        if (pending_pulses_ == configured_pulses_) {
+        if (pending_points_ == configured_points_) {
             ++stats_.full_frames;
         } else {
             ++stats_.tail_frames;
         }
         pending_wire_bytes_ = 0;
         pending_offset_ = 0;
-        pending_pulses_ = 0;
+        pending_points_ = 0;
     }
     return true;
 }
 
 bool FileSource::build_frame() {
-    const std::size_t remaining_pulses = total_pulses_ - pulse_offset_;
-    const std::size_t actual_pulses =
-        std::min(configured_pulses_, remaining_pulses);
-    const std::size_t elements = actual_pulses * samples_per_pulse_;
+    const std::size_t remaining_points = total_points_ - point_offset_;
+    const std::size_t points =
+        std::min(configured_points_, remaining_points);
+    const std::size_t elements = points;
     const std::size_t data_bytes =
         elements * sizeof(cy::common::CS16);
 
-    frame_.header.pulses = static_cast<std::uint32_t>(actual_pulses);
-    frame_.header.samples_per_pulse =
-        static_cast<std::uint32_t>(samples_per_pulse_);
+    frame_.header.points = static_cast<std::uint32_t>(points);
     frame_.payload.resize(elements);
     file_.read(
         reinterpret_cast<char*>(frame_.payload.data()),
@@ -180,10 +166,10 @@ bool FileSource::build_frame() {
         throw std::runtime_error("failed to seal IQFrame");
     }
     pending_offset_ = 0;
-    pending_pulses_ = actual_pulses;
+    pending_points_ = points;
 
-    pulse_offset_ += actual_pulses;
-    if (pulse_offset_ == total_pulses_) {
+    point_offset_ += points;
+    if (point_offset_ == total_points_) {
         rewind_file();
     }
     return true;
@@ -212,7 +198,7 @@ void FileSource::rewind_file() {
     if (!file_) {
         throw std::runtime_error("failed to rewind IQ .bin file");
     }
-    pulse_offset_ = 0;
+    point_offset_ = 0;
     ++stats_.rewinds;
 }
 

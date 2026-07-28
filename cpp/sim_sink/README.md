@@ -12,7 +12,7 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-参数为 `file_path`、`pulses`、`samples_per_pulse`，可选
+参数为 `file_path`、`points`，可选
 `initial_sequence_id`。目录不引用外部源码。
 
 ```yaml
@@ -20,7 +20,6 @@ type: sim_sink
 plugin: sim_sink.so
 params:
   file_path: /data/iq.bin
-  pulses: 64
-  samples_per_pulse: 4096
+  points: 262144
   initial_sequence_id: 0
 ```

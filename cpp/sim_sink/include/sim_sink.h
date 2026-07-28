@@ -43,10 +43,9 @@ private:
     void consume_or_throw(std::size_t bytes);
 
     std::string file_path_;
-    std::size_t configured_pulses_ = 0;
-    std::size_t samples_per_pulse_ = 0;
-    std::size_t total_pulses_ = 0;
-    std::size_t expected_pulse_offset_ = 0;
+    std::size_t configured_points_ = 0;
+    std::size_t total_points_ = 0;
+    std::size_t expected_point_offset_ = 0;
     std::size_t maximum_elements_ = 0;
     std::size_t maximum_wire_bytes_ = 0;
     std::vector<cy::common::CS16> reference_;

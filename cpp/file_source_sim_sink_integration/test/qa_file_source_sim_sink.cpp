@@ -186,8 +186,7 @@ void Run(const char* file_source_path, const char* sim_sink_path) {
 
     const fg::ValueMap params{
         {"file_path", fixture.path()},
-        {"pulses", std::int64_t{4}},
-        {"samples_per_pulse", std::int64_t{3}},
+        {"points", std::int64_t{12}},
         {"initial_sequence_id", std::int64_t{20}},
     };
     auto source =
@@ -217,7 +216,7 @@ void Run(const char* file_source_path, const char* sim_sink_path) {
     source->start();
     sink->start();
 
-    const std::array<std::uint32_t, 3> pulse_cycle{4, 4, 2};
+    const std::array<std::uint32_t, 3> point_cycle{12, 12, 6};
     std::size_t reference_offset = 0;
     std::uint64_t previous_timestamp = 0;
     sdk::FrameMetadata metadata;
@@ -226,7 +225,7 @@ void Run(const char* file_source_path, const char* sim_sink_path) {
             *source, *sink, observer_input, observer,
             maximum_wire_bytes, &metadata);
         const auto& frame = observer.frame();
-        Require(frame.header.pulses == pulse_cycle[index % 3],
+        Require(frame.header.points == point_cycle[index % 3],
                 "integration variable frame sequence mismatch");
         Require(metadata.sequence_id == 20 + index,
                 "integration sequence mismatch");

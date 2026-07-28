@@ -63,8 +63,7 @@ private:
 fg::ValueMap Params(const Fixture& fixture) {
     return {
         {"file_path", fixture.path()},
-        {"pulses", std::int64_t{4}},
-        {"samples_per_pulse", std::int64_t{3}},
+        {"points", std::int64_t{12}},
         {"initial_sequence_id", std::int64_t{0}},
     };
 }
@@ -80,15 +79,14 @@ public:
     void publish(fg::PortOut<std::byte>& source,
                  const Fixture& fixture,
                  std::size_t element_offset,
-                 std::uint32_t pulses,
+                 std::uint32_t points,
                  std::uint64_t sequence,
                  std::uint64_t timestamp,
                  bool corrupt_payload = false,
-                 std::uint32_t header_pulses = 0) {
-        frame_.header.pulses =
-            header_pulses == 0 ? pulses : header_pulses;
-        frame_.header.samples_per_pulse = 3;
-        frame_.payload.resize(static_cast<std::size_t>(pulses) * 3);
+                 std::uint32_t header_points = 0) {
+        frame_.header.points =
+            header_points == 0 ? points : header_points;
+        frame_.payload.resize(points);
         std::copy_n(
             fixture.values().begin() + element_offset,
             frame_.payload.size(),
@@ -141,17 +139,17 @@ void TestValidationAndContinue() {
     fg::connect(source, sink.in, sink.maximum_wire_bytes() * 2);
     FramePublisher publisher(sink.maximum_wire_bytes());
 
-    publisher.publish(source, fixture, 0, 4, 0, 100);
+    publisher.publish(source, fixture, 0, 12, 0, 100);
     Require(sink.process_work(), "SimSink did not consume valid frame");
-    publisher.publish(source, fixture, 12, 4, 99, 101);
+    publisher.publish(source, fixture, 12, 12, 99, 101);
     Require(sink.process_work(), "SimSink did not consume bad sequence");
-    publisher.publish(source, fixture, 24, 2, 2, 100);
+    publisher.publish(source, fixture, 24, 6, 2, 100);
     Require(sink.process_work(), "SimSink did not consume bad timestamp");
-    publisher.publish(source, fixture, 0, 4, 3, 102, false, 3);
+    publisher.publish(source, fixture, 0, 12, 3, 102, false, 11);
     Require(sink.process_work(), "SimSink did not consume bad header");
-    publisher.publish(source, fixture, 12, 4, 4, 103, true);
+    publisher.publish(source, fixture, 12, 12, 4, 103, true);
     Require(sink.process_work(), "SimSink did not consume bad payload");
-    publisher.publish(source, fixture, 24, 2, 5, 104);
+    publisher.publish(source, fixture, 24, 6, 5, 104);
     Require(sink.process_work(), "SimSink did not recover after errors");
 
     const auto& stats = sink.stats();
@@ -171,7 +169,7 @@ void TestPartialFrameDoesNotConsume() {
     FramePublisher publisher(sink.maximum_wire_bytes());
 
     IQFrame frame;
-    frame.header = {4, 3};
+    frame.header = {12};
     frame.payload.assign(fixture.values().begin(),
                          fixture.values().begin() + 12);
     std::vector<std::byte> payload(
@@ -242,7 +240,7 @@ void TestFramingAndCodecErrors() {
     Require(sink.stats().codec_errors == 1,
             "SimSink codec error count mismatch");
 
-    publisher.publish(source, fixture, 12, 4, 1, 101);
+    publisher.publish(source, fixture, 12, 12, 1, 101);
     Require(sink.process_work(), "SimSink did not recover after codec error");
     Require(sink.stats().frames_valid == 1,
             "SimSink valid frame did not recover after codec error");
@@ -256,9 +254,9 @@ void TestZeroAllocations() {
     FramePublisher publisher(sink.maximum_wire_bytes());
 
     const std::size_t offsets[3] = {0, 12, 24};
-    const std::uint32_t pulses[3] = {4, 4, 2};
+    const std::uint32_t points[3] = {12, 12, 6};
     for (std::size_t i = 0; i < 3; ++i) {
-        publisher.publish(source, fixture, offsets[i], pulses[i], i, 100 + i);
+        publisher.publish(source, fixture, offsets[i], points[i], i, 100 + i);
         Require(sink.process_work(), "SimSink warmup failed");
     }
 
@@ -266,7 +264,7 @@ void TestZeroAllocations() {
     for (std::size_t i = 0; i < 30; ++i) {
         const std::size_t frame = i % 3;
         publisher.publish(
-            source, fixture, offsets[frame], pulses[frame],
+            source, fixture, offsets[frame], points[frame],
             i + 3, i + 103);
         Require(sink.process_work(), "SimSink steady-state work failed");
     }
@@ -279,7 +277,7 @@ void TestZeroAllocations() {
 void TestInvalidConfig() {
     Fixture fixture;
     auto params = Params(fixture);
-    params["samples_per_pulse"] = std::int64_t{0};
+    params["points"] = std::int64_t{0};
     bool threw = false;
     try {
         SimSink sink(params);
@@ -287,7 +285,7 @@ void TestInvalidConfig() {
     } catch (const std::invalid_argument&) {
         threw = true;
     }
-    Require(threw, "SimSink accepted zero samples_per_pulse");
+    Require(threw, "SimSink accepted zero points");
 
     params = Params(fixture);
     params["file_path"] = fixture.path() + ".missing.bin";

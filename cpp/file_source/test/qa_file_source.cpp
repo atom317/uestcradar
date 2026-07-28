@@ -29,12 +29,12 @@ void Require(bool condition, const char* message) {
 
 class Fixture {
 public:
-    Fixture(std::size_t pulses = 10, std::size_t samples = 3) {
+    Fixture(std::size_t points = 30) {
         const auto id = std::chrono::steady_clock::now()
                             .time_since_epoch().count();
         path_ = std::filesystem::temp_directory_path() /
                 ("file_source_" + std::to_string(id) + ".bin");
-        values_.resize(pulses * samples);
+        values_.resize(points);
         for (std::size_t i = 0; i < values_.size(); ++i) {
             values_[i] = cy::common::CS16{
                 static_cast<std::int16_t>(i + 1),
@@ -64,8 +64,7 @@ private:
 fg::ValueMap Params(const Fixture& fixture) {
     return {
         {"file_path", fixture.path()},
-        {"pulses", std::int64_t{4}},
-        {"samples_per_pulse", std::int64_t{3}},
+        {"points", std::int64_t{12}},
         {"initial_sequence_id", std::int64_t{7}},
     };
 }
@@ -143,18 +142,16 @@ void TestLoopingVariableFrames() {
     fg::connect(source.out, sink, source.maximum_wire_bytes());
     FrameReader reader(source.maximum_wire_bytes());
 
-    const std::array<std::uint32_t, 7> pulses{4, 4, 2, 4, 4, 2, 4};
+    const std::array<std::uint32_t, 7> points{12, 12, 6, 12, 12, 6, 12};
     std::size_t reference_offset = 0;
     std::uint64_t previous_timestamp = 0;
-    for (std::size_t index = 0; index < pulses.size(); ++index) {
+    for (std::size_t index = 0; index < points.size(); ++index) {
         sdk::FrameMetadata metadata;
         DriveOne(source, sink, reader, &metadata);
         const auto& frame = reader.frame();
-        Require(frame.header.pulses == pulses[index],
-                "FileSource pulses sequence mismatch");
-        Require(frame.header.samples_per_pulse == 3,
-                "FileSource samples_per_pulse mismatch");
-        Require(frame.payload.size() == pulses[index] * 3,
+        Require(frame.header.points == points[index],
+                "FileSource points sequence mismatch");
+        Require(frame.payload.size() == points[index],
                 "FileSource payload size mismatch");
         Require(metadata.sequence_id == 7 + index,
                 "FileSource sequence mismatch");
@@ -220,7 +217,7 @@ void TestInvalidFiles() {
     Require(threw, "FileSource accepted a non-.bin path");
 
     params = Params(fixture);
-    params["pulses"] = std::int64_t{0};
+    params["points"] = std::int64_t{0};
     threw = false;
     try {
         FileSource source(params);
@@ -228,15 +225,13 @@ void TestInvalidFiles() {
     } catch (const std::invalid_argument&) {
         threw = true;
     }
-    Require(threw, "FileSource accepted zero pulses");
+    Require(threw, "FileSource accepted zero points");
 
-    const std::array<std::pair<std::string, std::vector<std::byte>>, 3>
+    const std::array<std::pair<std::string, std::vector<std::byte>>, 2>
         invalid_files{{
             {fixture.path() + ".empty.bin", {}},
             {fixture.path() + ".unaligned.bin",
              {std::byte{1}, std::byte{2}, std::byte{3}}},
-            {fixture.path() + ".partial-pulse.bin",
-             std::vector<std::byte>(sizeof(cy::common::CS16))},
         }};
     for (const auto& invalid : invalid_files) {
         {

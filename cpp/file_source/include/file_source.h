@@ -42,10 +42,9 @@ private:
 
     std::string file_path_;
     std::ifstream file_;
-    std::size_t configured_pulses_ = 0;
-    std::size_t samples_per_pulse_ = 0;
-    std::size_t total_pulses_ = 0;
-    std::size_t pulse_offset_ = 0;
+    std::size_t configured_points_ = 0;
+    std::size_t total_points_ = 0;
+    std::size_t point_offset_ = 0;
     std::size_t maximum_elements_ = 0;
     std::size_t maximum_payload_bytes_ = 0;
     std::size_t maximum_wire_bytes_ = 0;
@@ -54,7 +53,7 @@ private:
     std::vector<std::byte> wire_staging_;
     std::size_t pending_wire_bytes_ = 0;
     std::size_t pending_offset_ = 0;
-    std::size_t pending_pulses_ = 0;
+    std::size_t pending_points_ = 0;
     std::uint64_t next_sequence_id_ = 0;
     std::uint64_t last_timestamp_ = 0;
     FileSourceStats stats_{};

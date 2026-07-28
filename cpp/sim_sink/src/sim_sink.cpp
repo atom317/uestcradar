@@ -39,18 +39,12 @@ std::uint64_t InitialSequence(const cy::flowgraph::ValueMap& params) {
 
 SimSink::SimSink(const cy::flowgraph::ValueMap& params)
     : file_path_(RequiredPath(params)),
-      configured_pulses_(PositiveSize(params, "pulses")),
-      samples_per_pulse_(PositiveSize(params, "samples_per_pulse")),
+      configured_points_(PositiveSize(params, "points")),
       expected_sequence_id_(InitialSequence(params)) {
-    if (configured_pulses_ > std::numeric_limits<std::uint32_t>::max() ||
-        samples_per_pulse_ > std::numeric_limits<std::uint32_t>::max()) {
-        throw std::overflow_error("IQ frame dimensions exceed uint32");
+    if (configured_points_ > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::overflow_error("IQ frame points exceed uint32");
     }
-    if (configured_pulses_ >
-        std::numeric_limits<std::size_t>::max() / samples_per_pulse_) {
-        throw std::overflow_error("IQ frame element count overflows size_t");
-    }
-    maximum_elements_ = configured_pulses_ * samples_per_pulse_;
+    maximum_elements_ = configured_points_;
     if (maximum_elements_ >
         (std::numeric_limits<std::size_t>::max() - sizeof(IQFrameHeader)) /
             sizeof(cy::common::CS16)) {
@@ -83,15 +77,11 @@ SimSink::SimSink(const cy::flowgraph::ValueMap& params)
     }
     const std::uint64_t elements =
         file_bytes / sizeof(cy::common::CS16);
-    if (elements % samples_per_pulse_ != 0) {
-        throw std::invalid_argument(
-            "reference IQ .bin does not contain an integer number of pulses");
-    }
     if (elements > std::numeric_limits<std::size_t>::max()) {
         throw std::overflow_error("reference IQ element count overflows size_t");
     }
     reference_.resize(static_cast<std::size_t>(elements));
-    total_pulses_ = reference_.size() / samples_per_pulse_;
+    total_points_ = reference_.size();
 
     file.clear();
     file.seekg(0, std::ios::beg);
@@ -163,11 +153,9 @@ bool SimSink::process_work() {
         last_timestamp_ = inspection.metadata.timestamp_unix_nano;
     }
 
-    const std::size_t expected_pulses =
-        std::min(configured_pulses_,
-                 total_pulses_ - expected_pulse_offset_);
-    const std::size_t expected_elements =
-        expected_pulses * samples_per_pulse_;
+    const std::size_t expected_points =
+        std::min(configured_points_,
+                 total_points_ - expected_point_offset_);
     const bool decoded =
         cycore::sdk::FrameDataCodec<IQFrame>::decode(
             cy::common::Span<const std::byte>(
@@ -178,26 +166,23 @@ bool SimSink::process_work() {
         ++stats_.codec_errors;
         valid = false;
     } else {
-        if (frame_.header.pulses != expected_pulses ||
-            frame_.header.samples_per_pulse != samples_per_pulse_ ||
-            frame_.payload.size() !=
-                static_cast<std::size_t>(frame_.header.pulses) *
-                    frame_.header.samples_per_pulse) {
+        if (frame_.header.points != expected_points ||
+            frame_.payload.size() != frame_.header.points) {
             ++stats_.header_errors;
             valid = false;
         }
-        if (frame_.payload.size() != expected_elements ||
+        if (frame_.payload.size() != expected_points ||
             !std::equal(
                 frame_.payload.begin(),
                 frame_.payload.end(),
                 reference_.begin() +
-                    expected_pulse_offset_ * samples_per_pulse_)) {
+                    expected_point_offset_)) {
             ++stats_.payload_errors;
             valid = false;
         }
     }
 
-    if (expected_pulses == configured_pulses_) {
+    if (expected_points == configured_points_) {
         ++stats_.full_frames;
     } else {
         ++stats_.tail_frames;
@@ -211,10 +196,10 @@ bool SimSink::process_work() {
 }
 
 void SimSink::advance_expected_frame() noexcept {
-    const std::size_t remaining = total_pulses_ - expected_pulse_offset_;
-    expected_pulse_offset_ += std::min(configured_pulses_, remaining);
-    if (expected_pulse_offset_ == total_pulses_) {
-        expected_pulse_offset_ = 0;
+    const std::size_t remaining = total_points_ - expected_point_offset_;
+    expected_point_offset_ += std::min(configured_points_, remaining);
+    if (expected_point_offset_ == total_points_) {
+        expected_point_offset_ = 0;
     }
 }
 

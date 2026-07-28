@@ -13,8 +13,8 @@ algorithm_template/
 └── test/                       # 算法正确性 QA 和 Benchmark
 ```
 
-模板不携带 SDK 镜像。所有目标统一包含仓库唯一真源
-`uestcradar/cpp/sdk/include`；若该路径不存在，CMake 配置直接失败。
+模板携带 `sdk/include` 的稳定 SDK 快照。所有目标只包含该目录，因此模板复制到独立
+工作目录后仍可配置和编译。开发者不得修改快照内容。
 
 开发者修改：
 

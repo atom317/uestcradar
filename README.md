@@ -87,7 +87,8 @@ graph TD
 ### 3. C++ 新算子开发模板 (algorithm_template)
 
 为了便于开发者快速构建、本地调试及跨平台容器化编译全新的 C++ 雷达流图算子，
-仓库内置了 POD 帧级模板。模板直接使用唯一 SDK `cpp/sdk/include`，不携带 SDK
+仓库内置了 POD 帧级模板。模板携带由 `cpp/sdk/include` 生成的稳定 SDK 快照，支持
+独立编译，算法开发者不应修改该快照。
 副本，并集成完整帧 QA 与 `CYCORE_REGISTER_BENCHMARK` 一键性能基线。
 
 > [!IMPORTANT]

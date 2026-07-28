@@ -23,10 +23,10 @@ set_target_properties(my_plugin PROPERTIES
 
 function(configure_algorithm_target target)
     set(UESTCRADAR_ALGORITHM_SDK_INCLUDE
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../cpp/sdk/include")
+        "${CMAKE_CURRENT_SOURCE_DIR}/sdk/include")
     if(NOT EXISTS "${UESTCRADAR_ALGORITHM_SDK_INCLUDE}/cycore_algorithm_sdk.h")
         message(FATAL_ERROR
-            "Canonical uestcradar SDK not found: ${UESTCRADAR_ALGORITHM_SDK_INCLUDE}")
+            "Template SDK snapshot not found: ${UESTCRADAR_ALGORITHM_SDK_INCLUDE}")
     endif()
     target_include_directories(${target} PRIVATE
         ${UESTCRADAR_ALGORITHM_SDK_INCLUDE}

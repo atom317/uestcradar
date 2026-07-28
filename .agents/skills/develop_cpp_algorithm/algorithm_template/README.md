@@ -21,7 +21,8 @@ my_algorithm/
     └── bm_algorithm_block.cpp  # 一键式性能基准
 ```
 
-所有算法目标统一使用仓库真源 `cpp/sdk/include`。算法目录脱离 `uestcradar` 仓库单独复制后不可直接配置。
+模板携带 `sdk/include` 稳定 SDK 快照，可脱离 `uestcradar` 仓库独立配置和编译。
+开发者不得修改该目录；SDK 更新由基础设施维护者统一完成。
 
 开发者只需修改 `data.h`、算法头文件/实现、插件标识和两个测试的业务输入/断言。
 不存在 `codec.h`，无需也不得为算法增加自定义 Codec。
@@ -42,7 +43,7 @@ typedef struct {
     uint32_t pulses;
     uint32_t samples_per_pulse;
     CS16 payload[64 * 4096]; // 纯 C 数组
-} PulseCompressionFrame;
+}PulseCompressionFrame;
 
 typedef struct {
     uint32_t rows;
@@ -164,13 +165,13 @@ docker build -t uestcradar-template-build \
   -f "$algo_dir/Dockerfile.build_cross" .
 ```
 
-挂载整个仓库，使算法源码和 SDK 同时可见，并在容器内交叉编译出 ARM64 架构的 `.so` 动态库：
+挂载模板目录，在容器内交叉编译出 ARM64 架构的 `.so` 动态库：
 
 ```bash
 # 命令参数说明：
 # 1. docker run --rm                    : 启动 Docker 容器，运行结束后自动清理销毁容器
 # 2. --user "$(id -u):$(id -g)"          : 传入宿主机当前用户 UID:GID，防止编译产物属主变为 root
-# 3. -v "$(pwd):/workspace"              : 挂载仓库根目录至容器内 /workspace，使源码和 SDK 均可见
+# 3. -v "$(pwd)/$algo_dir:/workspace"    : 挂载自带 SDK 快照的算法模板
 # 4. -w /workspace/.../algorithm_template : 指定容器启动后的初始工作目录
 # 5. uestcradar-template-build           : 所使用的 ARM64 交叉编译 Docker 镜像名称
 # 6. bash -lc "..."                      : 启动登录 Shell 执行 CMake 交叉编译与构建命令
@@ -180,8 +181,8 @@ docker build -t uestcradar-template-build \
 
 docker run --rm \
   --user "$(id -u):$(id -g)" \
-  -v "$(pwd):/workspace" \
-  -w /workspace/.agents/skills/develop_cpp_algorithm/algorithm_template \
+  -v "$(pwd)/$algo_dir:/workspace" \
+  -w /workspace \
   uestcradar-template-build \
   bash -lc "cmake -S . -B build-cross \
     -DCMAKE_BUILD_TYPE=Release \
@@ -203,5 +204,4 @@ docker run --rm \
 - `build-cross/my_plugin.so`
 
 交付前再次确认插件名、`.so` 文件名和 Block key 与部署配置一致。不得用本地
-x86_64 编译的 `.so` 代替交叉编译产物，也不得随单个算法复制或修改 SDK；SDK
-变更只能发生在仓库唯一真源 `cpp/sdk/include`。
+x86_64 编译的 `.so` 代替交叉编译产物，也不得修改模板内 `sdk/include` 的 SDK 快照。

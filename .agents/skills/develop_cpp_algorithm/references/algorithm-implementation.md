@@ -28,8 +28,8 @@ private:
 
 ## 2. 处理强类型完整帧
 
-算法声明自己的 POD 输入输出类型，并通过 `work()` 直接处理 SDK 已完成拆帧和整块
-复制的完整对象：
+算法声明自己的强类型输入输出，并通过 `work()` 直接处理 SDK 已完成拆帧和解码的
+完整对象：
 
 ```cpp
 class MyAlgorithm {
@@ -49,8 +49,10 @@ public:
 ```
 
 - `Produced`：算法成功生成一个输出帧；SDK 自动编码、封包并透传元数据。
-- `Retry`：保留当前已解码输入，等待条件满足后再次调用算法。
 - `Drop`：丢弃当前业务帧且不产生输出。
+
+传输残帧、非法 Envelope 和输出背压均由 SDK 处理，算法不得重试同一帧；完整且
+业务无效的输入才返回 `Drop`。
 
 算法内部不得解析 SDK Envelope、手动消费输入、处理环形折返、封装输出帧或复制 sequence/timestamp。
 
@@ -70,7 +72,9 @@ constexpr std::size_t Index(std::size_t channel,
 }
 ```
 
-固定上限的 `std::array`、预分配工作区和外部算法库计划应在构造阶段准备，避免稳态 `work()` 堆分配。
+变长帧的输出 vector 已由 SDK 按 `max_output_frame_bytes` reserve；`work()` 可在
+该上限内 `resize()`。其他工作区和外部算法库计划应在构造阶段准备，避免稳态
+`work()` 堆分配。
 
 ---
 
@@ -78,7 +82,8 @@ constexpr std::size_t Index(std::size_t channel,
 
 测试必须使用生产 `FrameAlgorithmAdapter` 或动态加载后的真实 Block，输入端发布 SDK 线帧，输出端重新组装并解码完整线帧。至少验证：
 
-1. POD 对象表示逐字节往返，且 `sizeof(T)±1` Payload 被拒绝；
+1. Header 与 vector 有效元素逐字节往返，空 vector、不同合法长度、不能整除
+   Element 大小及超过最大帧长均按契约处理；固定 POD 兼容路径仍做精确长度校验；
 2. 帧在每个字节位置切分时，残帧不触发算法且不推进读游标；
 3. 环形缓冲区折返后仍能得到同一完整帧；
 4. 输出背压不会导致算法重复执行；
@@ -122,8 +127,8 @@ static cy::flowgraph::ValueMap benchmark_params();
 
 ## 6. YAML 完整配置规范
 
-算子参数仍在 `blocks` 中配置。POD Wire 大小由类型唯一确定，不再配置
-`max_input_frame_bytes` 或 `max_output_frame_bytes`：
+算子参数仍在 `blocks` 中配置。变长帧必须给出含 32B Envelope 的最大输入输出
+Wire 字节数；固定 POD 不需要这两个参数：
 
 ```yaml
 blocks:
@@ -132,12 +137,14 @@ blocks:
     plugin: my_plugin.so
     params:
       algorithm_parameter: 16
+      max_input_frame_bytes: 1048616
+      max_output_frame_bytes: 1048616
 ```
 
 连接容量必须满足：
 
 ```text
-capacity >= 32 + sizeof(该连接上的 POD 类型)
+capacity >= 该连接配置的最大 Wire 帧字节数
 ```
 
 容量不需要是帧长的整数倍。物理折返、分段读取和完整帧重组由 SDK Adapter 负责；算法不得依赖某一次物理读写窗口恰好连续。

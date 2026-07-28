@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace cycore::sdk {
@@ -44,7 +45,6 @@ struct FrameMetadata {
 
 enum class ProcessResult {
     Produced,
-    Retry,
     Drop,
 };
 
@@ -84,15 +84,70 @@ struct FrameStats {
     std::uint64_t sequence_gaps = 0;
     std::uint64_t duplicate_sequences = 0;
     std::uint64_t out_of_order_sequences = 0;
-    std::uint64_t work_retries = 0;
     std::uint64_t output_backpressure_count = 0;
 };
+
+namespace detail {
+
+template <typename T>
+struct IsDefaultVector : std::false_type {};
+
+template <typename Element>
+struct IsDefaultVector<std::vector<Element, std::allocator<Element>>>
+    : std::true_type {};
+
+template <typename Frame, typename = void>
+struct VectorFrameTraits {
+    static constexpr bool value = false;
+};
+
+template <typename Frame>
+struct VectorFrameTraits<
+    Frame,
+    std::void_t<
+        decltype(std::declval<Frame&>().header),
+        decltype(std::declval<Frame&>().payload),
+        typename std::remove_cv_t<std::remove_reference_t<
+            decltype(std::declval<Frame&>().payload)>>::value_type>> {
+    using HeaderMember = std::remove_reference_t<
+        decltype((std::declval<Frame&>().header))>;
+    using PayloadMember = std::remove_reference_t<
+        decltype((std::declval<Frame&>().payload))>;
+    using Header = std::remove_cv_t<std::remove_reference_t<
+        decltype(std::declval<Frame&>().header)>>;
+    using Payload = std::remove_cv_t<std::remove_reference_t<
+        decltype(std::declval<Frame&>().payload)>>;
+    using Element = typename Payload::value_type;
+
+    static constexpr bool value =
+        !std::is_const_v<HeaderMember> &&
+        !std::is_const_v<PayloadMember> &&
+        IsDefaultVector<Payload>::value &&
+        std::is_default_constructible_v<Header> &&
+        std::is_trivially_copyable_v<Header> &&
+        std::is_trivially_default_constructible_v<Element> &&
+        !std::is_same_v<Element, bool> &&
+        std::is_trivially_copyable_v<Element>;
+};
+
+template <typename>
+struct DependentFalse : std::false_type {};
+
+} // namespace detail
+
+template <typename T>
+inline constexpr bool is_vector_frame_v =
+    detail::VectorFrameTraits<T>::value;
+
+template <typename T>
+inline constexpr bool is_supported_frame_v =
+    std::is_trivially_copyable_v<T> || is_vector_frame_v<T>;
 
 template <typename T>
 struct TrivialFrameCodec {
     static_assert(
         std::is_trivially_copyable_v<T>,
-        "Non-trivial data requires a custom FrameCodec, POD only");
+        "TrivialFrameCodec requires a trivially copyable fixed frame");
 
     static constexpr std::size_t encoded_size(const T&) noexcept {
         return sizeof(T);
@@ -117,7 +172,156 @@ struct TrivialFrameCodec {
     }
 };
 
+template <typename T>
+struct VectorFrameCodec {
+    static_assert(
+        is_vector_frame_v<T>,
+        "Variable frame data must contain a trivially copyable 'header' and "
+        "one std::vector<trivially-copyable Element> named 'payload'");
+
+    using Traits = detail::VectorFrameTraits<T>;
+    using Header = typename Traits::Header;
+    using Element = typename Traits::Element;
+
+    static std::size_t encoded_size(const T& value) noexcept {
+        if (value.payload.size() >
+            (std::numeric_limits<std::size_t>::max() - sizeof(Header)) /
+                sizeof(Element)) {
+            return std::numeric_limits<std::size_t>::max();
+        }
+        return sizeof(Header) + value.payload.size() * sizeof(Element);
+    }
+
+    static bool encode(const T& value,
+                       cy::common::Span<std::byte> payload) noexcept {
+        const std::size_t expected = encoded_size(value);
+        if (expected == std::numeric_limits<std::size_t>::max() ||
+            payload.size() != expected) {
+            return false;
+        }
+        std::memcpy(payload.data(), std::addressof(value.header), sizeof(Header));
+        if (!value.payload.empty()) {
+            std::memcpy(
+                payload.data() + sizeof(Header),
+                value.payload.data(),
+                value.payload.size() * sizeof(Element));
+        }
+        return true;
+    }
+
+    static bool decode(cy::common::Span<const std::byte> payload,
+                       T& value) noexcept {
+        if (payload.size() < sizeof(Header)) {
+            return false;
+        }
+        const std::size_t element_bytes = payload.size() - sizeof(Header);
+        if (element_bytes % sizeof(Element) != 0) {
+            return false;
+        }
+        const std::size_t count = element_bytes / sizeof(Element);
+        if (count > value.payload.capacity()) {
+            return false;
+        }
+        std::memcpy(std::addressof(value.header), payload.data(), sizeof(Header));
+        value.payload.resize(count);
+        if (count != 0) {
+            std::memcpy(
+                value.payload.data(),
+                payload.data() + sizeof(Header),
+                element_bytes);
+        }
+        return true;
+    }
+};
+
+template <typename T, typename Enable = void>
+struct FrameDataCodec {
+    static_assert(
+        detail::DependentFalse<T>::value,
+        "Frame data must be trivially copyable or contain POD 'header' and "
+        "std::vector<Element> 'payload'");
+};
+
+template <typename T>
+struct FrameDataCodec<
+    T,
+    std::enable_if_t<std::is_trivially_copyable_v<T>>>
+    : TrivialFrameCodec<T> {};
+
+template <typename T>
+struct FrameDataCodec<
+    T,
+    std::enable_if_t<is_vector_frame_v<T>>>
+    : VectorFrameCodec<T> {};
+
 namespace detail {
+
+template <typename T>
+constexpr std::size_t minimum_wire_bytes() noexcept {
+    if constexpr (is_vector_frame_v<T>) {
+        return kFrameEnvelopeBytes +
+               sizeof(typename VectorFrameTraits<T>::Header);
+    } else {
+        return kFrameEnvelopeBytes + sizeof(T);
+    }
+}
+
+inline std::size_t read_required_frame_limit(
+    const cy::flowgraph::ValueMap& values,
+    const char* key,
+    std::size_t minimum) {
+    const auto configured =
+        Params(values).get<std::int64_t>(key, 0);
+    if (configured <= 0) {
+        throw std::invalid_argument(
+            std::string(key) + " must be configured for variable frame data");
+    }
+    const std::size_t value = static_cast<std::size_t>(configured);
+    if (value < minimum) {
+        throw std::invalid_argument(
+            std::string(key) + " is smaller than the minimum frame size");
+    }
+    return value;
+}
+
+template <typename T>
+std::size_t resolve_frame_limit(
+    const cy::flowgraph::ValueMap& values,
+    const char* key) {
+    static_assert(is_supported_frame_v<T>, "Unsupported SDK frame data type");
+    if constexpr (is_vector_frame_v<T>) {
+        return read_required_frame_limit(
+            values, key, minimum_wire_bytes<T>());
+    } else {
+        return minimum_wire_bytes<T>();
+    }
+}
+
+template <typename T>
+void reserve_frame_payload(T& value, std::size_t maximum_wire_bytes) {
+    if constexpr (is_vector_frame_v<T>) {
+        using Traits = VectorFrameTraits<T>;
+        using Element = typename Traits::Element;
+        const std::size_t payload_capacity =
+            maximum_wire_bytes - minimum_wire_bytes<T>();
+        value.payload.reserve(payload_capacity / sizeof(Element));
+    } else {
+        (void)value;
+        (void)maximum_wire_bytes;
+    }
+}
+
+template <typename T>
+bool declared_wire_size_is_valid(std::size_t wire_bytes) noexcept {
+    if (wire_bytes == 0) {
+        return true;
+    }
+    if constexpr (is_vector_frame_v<T>) {
+        return wire_bytes >= minimum_wire_bytes<T>();
+    } else {
+        return wire_bytes == minimum_wire_bytes<T>();
+    }
+}
 
 inline std::uint16_t read_u16_le(const std::byte* data) noexcept {
     return static_cast<std::uint16_t>(
@@ -293,35 +497,41 @@ class FrameAlgorithmAdapter
 public:
     using InputData = typename Algorithm::InputData;
     using OutputData = typename Algorithm::OutputData;
-    using InputCodec = TrivialFrameCodec<InputData>;
-    using OutputCodec = TrivialFrameCodec<OutputData>;
+    using InputCodec = FrameDataCodec<InputData>;
+    using OutputCodec = FrameDataCodec<OutputData>;
 
     static_assert(
-        std::is_trivially_copyable_v<InputData>,
-        "Non-trivial data requires a custom FrameCodec, POD only");
+        is_supported_frame_v<InputData>,
+        "InputData must be POD or a header + vector frame");
     static_assert(
-        std::is_trivially_copyable_v<OutputData>,
-        "Non-trivial data requires a custom FrameCodec, POD only");
+        is_supported_frame_v<OutputData>,
+        "OutputData must be POD or a header + vector frame");
     static_assert(std::is_default_constructible_v<InputData>,
                   "Frame algorithm InputData must be default constructible");
     static_assert(std::is_default_constructible_v<OutputData>,
                   "Frame algorithm OutputData must be default constructible");
-
-    static constexpr std::size_t kInputWireBytes =
-        kFrameEnvelopeBytes + sizeof(InputData);
-    static constexpr std::size_t kOutputWireBytes =
-        kFrameEnvelopeBytes + sizeof(OutputData);
 
     cy::flowgraph::PortIn<std::byte> in;
     cy::flowgraph::PortOut<std::byte> out;
     CY_MAKE_REFLECTABLE(FrameAlgorithmAdapter, in, out);
 
     explicit FrameAlgorithmAdapter(const cy::flowgraph::ValueMap& values)
-        : input_staging_(kInputWireBytes),
-          output_staging_(kOutputWireBytes),
+        : maximum_input_wire_bytes_(
+              detail::resolve_frame_limit<InputData>(
+                  values, "max_input_frame_bytes")),
+          maximum_output_wire_bytes_(
+              detail::resolve_frame_limit<OutputData>(
+                  values, "max_output_frame_bytes")),
+          input_staging_(maximum_input_wire_bytes_),
+          output_staging_(maximum_output_wire_bytes_),
           algorithm_(std::make_unique<Algorithm>(Params(values))),
           input_data_(std::make_unique<InputData>()),
-          output_data_(std::make_unique<OutputData>()) {}
+          output_data_(std::make_unique<OutputData>()) {
+        detail::reserve_frame_payload(
+            *input_data_, maximum_input_wire_bytes_);
+        detail::reserve_frame_payload(
+            *output_data_, maximum_output_wire_bytes_);
+    }
 
     bool process_work() {
         if (output_pending_) {
@@ -356,15 +566,15 @@ private:
         }
         auto inspection = InspectFrame(
             cy::common::Span<const std::byte>(header.data(), header.size()),
-            kInputWireBytes);
+            maximum_input_wire_bytes_);
         if (inspection.status == FrameParseStatus::InvalidFrame) {
             record_frame_error(inspection.error);
             consume_or_throw(inspection.discard_bytes);
             ++stats_.frames_dropped;
             return true;
         }
-        if (inspection.wire_bytes != 0 &&
-            inspection.wire_bytes != kInputWireBytes) {
+        if (!detail::declared_wire_size_is_valid<InputData>(
+                inspection.wire_bytes)) {
             record_frame_error(FrameError::BadFrameSize);
             consume_or_throw(1);
             ++stats_.frames_dropped;
@@ -382,7 +592,7 @@ private:
         }
         inspection = InspectFrame(
             cy::common::Span<const std::byte>(wire.data(), wire.size()),
-            kInputWireBytes);
+            maximum_input_wire_bytes_);
         ++stats_.frames_received;
         if (inspection.status != FrameParseStatus::CompleteFrame) {
             record_frame_error(inspection.error);
@@ -413,23 +623,25 @@ private:
     bool invoke_algorithm() {
         const ProcessResult result =
             algorithm_->work(*input_data_, *output_data_);
-        if (result == ProcessResult::Retry) {
-            ++stats_.work_retries;
-            return false;
-        }
         if (result == ProcessResult::Drop) {
             input_ready_ = false;
             ++stats_.frames_dropped;
             return true;
         }
 
-        constexpr std::size_t payload_bytes = sizeof(OutputData);
+        const std::size_t payload_bytes =
+            OutputCodec::encoded_size(*output_data_);
+        if (payload_bytes >
+            maximum_output_wire_bytes_ - kFrameEnvelopeBytes) {
+            throw std::length_error(
+                "Algorithm output exceeds max_output_frame_bytes");
+        }
         std::size_t wire_bytes = 0;
         auto payload = cy::common::Span<std::byte>(
             output_staging_.data() + kFrameEnvelopeBytes, payload_bytes);
         if (!OutputCodec::encode(*output_data_, payload)) {
             ++stats_.codec_failures;
-            throw std::runtime_error("Trivial frame output copy failed");
+            throw std::runtime_error("Frame output encode failed");
         }
         if (!detail::seal_frame(
                 cy::common::Span<std::byte>(output_staging_.data(),
@@ -439,10 +651,6 @@ private:
                 &wire_bytes)) {
             throw std::runtime_error("Failed to seal SDK output frame");
         }
-        if (wire_bytes != kOutputWireBytes) {
-            throw std::runtime_error("Trivial frame output size mismatch");
-        }
-
         input_ready_ = false;
         output_pending_ = true;
         output_wire_bytes_ = wire_bytes;
@@ -518,6 +726,8 @@ private:
         }
     }
 
+    std::size_t maximum_input_wire_bytes_;
+    std::size_t maximum_output_wire_bytes_;
     std::vector<std::byte> input_staging_;
     std::vector<std::byte> output_staging_;
     std::unique_ptr<Algorithm> algorithm_;

@@ -172,39 +172,63 @@ class FrameBenchmarkDriver {
 public:
     using InputData = typename Algorithm::InputData;
     using OutputData = typename Algorithm::OutputData;
-    using InputCodec = cycore::sdk::TrivialFrameCodec<InputData>;
-    using OutputCodec = cycore::sdk::TrivialFrameCodec<OutputData>;
+    using InputCodec = cycore::sdk::FrameDataCodec<InputData>;
+    using OutputCodec = cycore::sdk::FrameDataCodec<OutputData>;
 
     template <typename Prepare>
     explicit FrameBenchmarkDriver(Prepare&& prepare)
         : values_(BenchmarkParams<Algorithm>::get()),
           input_data_(std::make_unique<InputData>()),
           output_data_(std::make_unique<OutputData>()) {
-        static_assert(std::is_trivially_copyable_v<InputData>,
-                      "Non-trivial data requires a custom FrameCodec, POD only");
-        static_assert(std::is_trivially_copyable_v<OutputData>,
-                      "Non-trivial data requires a custom FrameCodec, POD only");
+        static_assert(cycore::sdk::is_supported_frame_v<InputData>,
+                      "Unsupported benchmark InputData frame type");
+        static_assert(cycore::sdk::is_supported_frame_v<OutputData>,
+                      "Unsupported benchmark OutputData frame type");
         static_assert(std::is_default_constructible_v<InputData>,
                       "Benchmark InputData must be default constructible");
         static_assert(std::is_default_constructible_v<OutputData>,
                       "Benchmark OutputData must be default constructible");
 
         prepare(*input_data_);
-        constexpr std::size_t input_payload_bytes = sizeof(InputData);
+        const std::size_t input_payload_bytes =
+            InputCodec::encoded_size(*input_data_);
         input_payload_.resize(input_payload_bytes);
         if (!InputCodec::encode(
                 *input_data_,
                 cy::common::Span<std::byte>(
                     input_payload_.data(), input_payload_.size()))) {
-            throw std::runtime_error("benchmark input POD copy failed");
+            throw std::runtime_error("benchmark input frame encode failed");
         }
 
-        constexpr std::size_t output_payload_bytes = sizeof(OutputData);
         input_wire_bytes_ =
             cycore::sdk::WireFrameBytes(input_payload_.size());
+
+        auto preflight_output = std::make_unique<OutputData>();
+        Algorithm preflight_algorithm{cycore::sdk::Params(values_)};
+        if (preflight_algorithm.work(*input_data_, *preflight_output) !=
+            cycore::sdk::ProcessResult::Produced) {
+            throw std::runtime_error(
+                "benchmark representative input was dropped");
+        }
+        const std::size_t output_payload_bytes =
+            OutputCodec::encoded_size(*preflight_output);
         output_wire_bytes_ =
             cycore::sdk::WireFrameBytes(output_payload_bytes);
+        constexpr auto kMaximumConfiguredBytes =
+            static_cast<std::size_t>(
+                std::numeric_limits<std::int64_t>::max());
+        if (input_wire_bytes_ > kMaximumConfiguredBytes ||
+            output_wire_bytes_ > kMaximumConfiguredBytes) {
+            throw std::length_error(
+                "benchmark frame size exceeds SDK configuration range");
+        }
 
+        values_["max_input_frame_bytes"] =
+            static_cast<std::int64_t>(input_wire_bytes_);
+        values_["max_output_frame_bytes"] =
+            static_cast<std::int64_t>(output_wire_bytes_);
+        cycore::sdk::detail::reserve_frame_payload(
+            *output_data_, output_wire_bytes_);
         input_wire_.resize(input_wire_bytes_);
         output_wire_.resize(output_wire_bytes_);
         adapter_ = std::make_unique<
@@ -290,7 +314,7 @@ public:
             inspection.payload_bytes);
         if (!OutputCodec::decode(output_payload, *output_data_)) {
             throw std::runtime_error(
-                "benchmark output POD copy failed");
+                "benchmark output frame decode failed");
         }
         update_checksum(checksum_, output_payload);
         if (!sink_.consume_exact(inspection.wire_bytes)) {

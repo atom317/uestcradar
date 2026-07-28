@@ -1,7 +1,9 @@
-# Cycore POD 帧级 C++ 算法开发指南
+stru
 
-本指南用于在 `uestcradar` 仓库内开发帧级算法插件。开发者定义固定容量 POD
-数据、实现数学逻辑并填写 QA/Benchmark 输入；SDK 自动完成拆帧、整块复制、
+# C++ 算法开发指南
+
+本指南用于在 `uestcradar` 仓库内开发帧级算法插件。开发者定义强类型完整帧
+数据、实现数学逻辑并填写 QA/Benchmark 输入；SDK 自动完成拆帧、变长帧编解码、
 元数据透传和输出封包。
 
 ## 目录与修改范围
@@ -11,7 +13,7 @@ my_algorithm/
 ├── CMakeLists.txt
 ├── Dockerfile.build_cross
 ├── include/
-│   ├── data.h                  # POD InputData/OutputData
+│   ├── data.h                  # 强类型 InputData/OutputData
 │   └── algorithm.h             # 算法接口
 ├── src/
 │   ├── algorithm.cpp           # 数学实现
@@ -27,52 +29,60 @@ my_algorithm/
 开发者只需修改 `data.h`、算法头文件/实现、插件标识和两个测试的业务输入/断言。
 不存在 `codec.h`，无需也不得为算法增加自定义 Codec。
 
-## POD 数据契约
+## 数据契约
 
-`InputData` 和 `OutputData` 必须默认可构造且满足：
-
-```cpp
-std::is_trivially_copyable_v<T>
-```
-
-只允许标量、枚举、平凡嵌套结构和 `std::array`。禁止 `std::vector`、
-`std::string`、指针、智能指针、Span/View、虚函数和外部内存所有权。
+默认使用下面的极简变长契约：
 
 ```cpp
-typedef struct {
-    uint32_t pulses;
-    uint32_t samples_per_pulse;
-    CS16 payload[64 * 4096]; // 纯 C 数组
-}PulseCompressionFrame;
+struct PulseCompressionHeader {
+    std::uint32_t pulses;
+    std::uint32_t samples_per_pulse;
+};
 
-typedef struct {
-    uint32_t rows;
-    uint32_t cols;
-    float payload[64 * 4096]; // 纯 C 数组
-} RDMapFrame;
+struct PulseCompressionFrame {
+    PulseCompressionHeader header;
+    std::vector<CS16> payload;
+};
+
+struct RDMapHeader {
+    std::uint32_t rows;
+    std::uint32_t cols;
+};
+
+struct RDMapFrame {
+    RDMapHeader header;
+    std::vector<float> payload;
+};
 ```
 
-每帧 Payload 固定为 `sizeof(T)`。维度字段只说明数组中的有效区域，不改变传输
-长度。输入使用 `{}` 初始化后再填写；每次返回 `Produced` 前必须确定性覆盖或清零
-`OutputData` 的全部成员，避免未使用数组区域携带上一帧数据。业务维度由
-`work()` 校验，非法业务字段返回 `Drop`。
+SDK 按成员名自动识别 `header + payload`：`header` 必须平凡可复制，`payload`
+必须是默认 allocator 的 `std::vector<Element>`，且 `Element` 平凡默认构造并
+平凡可复制。Wire
+只包含 Header 和 vector 的有效元素，不传输 vector 对象本身、capacity 或指针。
+业务元数据统一放在 `header` 中，不要在帧结构体增加第三个待传输成员。
 
-Wire 使用原生对象布局：
+仍可使用完全平凡可复制的固定 POD（标量、平凡嵌套结构、`std::array`），SDK
+会自动走固定帧路径。两种形式都不需要 `codec.h`。禁止 `std::string`、指针、
+智能指针、Span/View、虚函数和其他外部内存所有权。
 
-```text
-[32B SDK Envelope][sizeof(T) POD Payload]
+生产流图中，变长帧的 Block 参数必须给出包含 32B Envelope 的最大 Wire 长度：
+
+```yaml
+params:
+  max_input_frame_bytes: 1048616
+  max_output_frame_bytes: 1048616
 ```
 
-因此上下游必须使用兼容的编译器 ABI、结构体布局和字节序。修改字段、顺序、类型或
-数组容量均属于数据契约变更。
+SDK 用该上限一次性建立暂存区并 reserve vector。算法仍应校验 Header 中的业务
+形状与 `payload.size()` 一致，业务不合法时返回 `Drop`。
 
 ## 算法接口
 
 ```cpp
 class MyAlgorithm {
 public:
-    using InputData = PulseCompressionFrame;
-    using OutputData = RDMapFrame;
+    using InputData = PulseCompressionFrame;//此处定义传入的数据结构体
+    using OutputData = RDMapFrame;//此处定义传出的数据结构体
 
     explicit MyAlgorithm(const cycore::sdk::Params& params);
 
@@ -126,13 +136,14 @@ ctest --test-dir /tmp/build-my-algorithm --output-on-failure
 CYCORE_REGISTER_BENCHMARK(
     MyAlgorithm,
     [](MyAlgorithm::InputData& input) {
-        input.sample_count =
+        input.header.sample_count =
             cycore::algorithm::my_block::kMaxSamples;
+        input.payload.resize(input.header.sample_count);
         // 开发者在此填充代表性雷达信号数据
     });
 ```
 
-Harness 根据 `sizeof(InputData/OutputData)` 自动建立完整字节流链路，完成 Envelope、
+Harness 根据代表性输入输出的实际编码长度自动建立完整字节流链路，完成 Envelope、
 调度、输出消费、sequence 校验和指标计算。算法 Benchmark 禁止手写 Port、连接、
 封帧、`peek_copy`、`consume_exact`、计时和吞吐公式。
 
@@ -192,7 +203,7 @@ docker run --rm \
 ```
 
 最终在 ARM64 实际硬件或仿真环境中运行 `qa_algorithm_block` 与 Benchmark。
-原生 POD Wire 不承诺 x86_64 与 AArch64 直接交换；两端必须分别确认 ABI 契约。
+原生 Header/POD Wire 不承诺 x86_64 与 AArch64 直接交换；两端必须分别确认 ABI 契约。
 
 ## 交付产物
 

@@ -14,13 +14,17 @@ MyAlgorithm::MyAlgorithm(const cycore::sdk::Params& params)
 
 cycore::sdk::ProcessResult MyAlgorithm::work(const InputData& input,
                                              OutputData& output) noexcept {
-    if (input.sample_count == 0 || input.sample_count > my_block_data::kMaxSamples) {
+    const std::size_t sample_count = input.header.sample_count;
+    if (sample_count == 0 ||
+        sample_count > my_block_data::kMaxSamples ||
+        input.payload.size() != sample_count) {
         return cycore::sdk::ProcessResult::Drop;
     }
-    output = OutputData{};
-    output.sample_count = input.sample_count;
-    for (std::size_t i = 0; i < input.sample_count; ++i) {
-        output.samples[i] = input.samples[i] * static_cast<float>(factor_);
+    output.header.sample_count = input.header.sample_count;
+    output.payload.resize(sample_count);
+    for (std::size_t i = 0; i < sample_count; ++i) {
+        output.payload[i] =
+            input.payload[i] * static_cast<float>(factor_);
     }
     return cycore::sdk::ProcessResult::Produced;
 }

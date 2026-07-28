@@ -54,9 +54,10 @@ uestcradar/
 ## C++ 算子插件 (C++ 部分)
 
 C++ 算子插件通过 YAML 流图配置文件进行动态拓扑连接。新算法使用 Cycore SDK
-帧级接口：流图边统一传输 `std::byte`，SDK 负责拆帧、精确长度校验、POD
-整块复制、元数据透传和输出封包，算法 `work()` 只处理固定容量且平凡可复制的
-`InputData` / `OutputData`。算法无需编写 Codec。仓库仍保留部分待迁移的旧
+帧级接口：流图边统一传输 `std::byte`，SDK 负责拆帧、精确长度校验、固定 POD
+或 `header + std::vector payload` 的自动编解码、元数据透传和输出封包，算法
+`work()` 只处理完整的强类型 `InputData` / `OutputData`。算法无需编写 Codec。
+仓库仍保留部分待迁移的旧
 `Reader` / `Writer` 算子。
 
 ### 1. 级联流水线拓扑
@@ -87,7 +88,7 @@ graph TD
 ### 3. C++ 新算子开发模板 (algorithm_template)
 
 为了便于开发者快速构建、本地调试及跨平台容器化编译全新的 C++ 雷达流图算子，
-仓库内置了 POD 帧级模板。模板携带由 `cpp/sdk/include` 生成的稳定 SDK 快照，支持
+仓库内置了变长帧级模板，并兼容固定 POD。模板携带由 `cpp/sdk/include` 生成的稳定 SDK 快照，支持
 独立编译，算法开发者不应修改该快照。
 副本，并集成完整帧 QA 与 `CYCORE_REGISTER_BENCHMARK` 一键性能基线。
 

@@ -22,14 +22,16 @@ graph TD
 
 ### 📂 阶段一：制定数据格式 (I/O Specification)
 
-1. **POD 强类型**：算法自行定义默认可构造且
-   `std::is_trivially_copyable_v<T>` 的 `InputData`、`OutputData`。
-2. **固定内联存储**：只使用标量、平凡嵌套结构和 `std::array`；禁止
-   `std::vector`、字符串、指针、Span/View、虚函数和拥有外部内存的成员。
-3. **0 手写 Codec**：Payload 固定为 `sizeof(T)`，SDK 使用单次 `memcpy`
-   自动收发。算法不得解析 Envelope、手工透传元数据或操作字节流。
-4. **确定性对象表示**：输入先 `{}` 初始化；每次 `Produced` 前覆盖或清零输出的
-   全部成员，禁止把上一帧未使用数组区域继续发送。
+1. **强类型完整帧**：算法自行定义默认可构造的 `InputData`、`OutputData`。
+   默认采用 `header + std::vector payload` 变长帧；固定 POD 继续兼容。
+2. **连续元素约束**：变长帧的 `header` 必须平凡可复制，`payload` 元素必须
+   平凡默认构造且平凡可复制，
+   `payload` 必须是默认 allocator 的 `std::vector<Element>`；禁止字符串、指针、
+   Span/View、虚函数和其他外部内存所有权。
+3. **0 手写 Codec**：SDK 按成员名自动选择固定 POD 或 vector 帧 Codec。算法不得
+   解析 Envelope、手工透传元数据或操作字节流。
+4. **显式最大帧长**：变长输入输出必须配置 `max_input_frame_bytes` 和
+   `max_output_frame_bytes`，SDK 在 Adapter 构造阶段一次性预留容量。
    *详细规范请参阅子指南：[2. 输入输出数据格式制定规范](references/data-format-specification.md)*
 
 ### 📂 阶段二：空壳算子全系统联调 (Skeleton Integration)
@@ -42,7 +44,7 @@ graph TD
 
 ### 📂 阶段三: 算法实现与闭环自检 (Implementation & Verification)
 
-1. **算法编写**：在骨架验证通过后，直接处理 SDK 已完整复制的 `InputData`，并写入固定容量的 `OutputData`。字节拆帧、折返拼接、输入消费和输出封包均由 SDK 负责。
+1. **算法编写**：在骨架验证通过后，直接处理 SDK 已完整解码的 `InputData`，并写入已预留容量的 `OutputData`。字节拆帧、折返拼接、输入消费和输出封包均由 SDK 负责。
 2. **沙盒自检**：只在 `test/qa_algorithm_block.cpp` 中直接实例化静态测试 Block（`SimSource` / `SimSink`），对输出结果进行 Epsilon 理论精度与通道隔离度断言。不要在算法模板新增插件加载、编译失败、分配探测或 CMake 辅助测试。
    *详细模板与自检规范请参阅子指南：[3. 算法实现与自检规范](references/algorithm-implementation.md)*
 
@@ -73,7 +75,7 @@ Harness 自动输出 frames/s、Payload GiB/s、平均延迟、稳态分配次�
 * [1. 模板目录结构与修改范围](references/template-structure.md)
   * **前期准备**：熟悉开发脚手架和修改范围。
 * [2. 输入输出数据格式制定规范](references/data-format-specification.md)
-  * 执行阶段一（制定格式）时阅读，学习 POD 类型、固定容量和原生 ABI 规约。
+  * 执行阶段一（制定格式）时阅读，学习变长 vector 帧、固定 POD 兼容和原生 ABI 规约。
 * [3. 算法实现与自检规范](references/algorithm-implementation.md)
   * 执行阶段三（编写与自检）时阅读，学习强类型帧处理、完整性边界和静态自检沙盒。
 * [C++ 雷达算法统一部署运维手册 (cpp_algorithm_ops)](../cpp_algorithm_ops/SKILL.md)

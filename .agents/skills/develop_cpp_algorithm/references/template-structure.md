@@ -6,7 +6,7 @@
 ```text
 algorithm_template/
 ├── CMakeLists.txt
-├── include/data.h              # POD InputData/OutputData
+├── include/data.h              # 强类型 InputData/OutputData
 ├── include/algorithm.h         # 强类型算法接口
 ├── src/algorithm.cpp           # 算法实现
 ├── src/algorithm_block.cpp     # 帧级插件导出宏

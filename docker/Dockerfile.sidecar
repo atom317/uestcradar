@@ -1,0 +1,25 @@
+# syntax=docker/dockerfile:1
+
+ARG BASE_IMAGE=registry.chengyistudio.com/cxx/ubuntu:24.04
+
+FROM ${BASE_IMAGE} AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY workspace/sidecar/ ./
+RUN mkdir -p /out \
+    && g++ -std=c++20 -O2 -Wall -Wextra -Wpedantic \
+       -static-libgcc -static-libstdc++ \
+       ringbuf.cpp main.cpp -o /out/sidecar
+
+FROM ${BASE_IMAGE} AS runtime
+
+WORKDIR /app
+COPY --from=builder /out/sidecar /app/sidecar
+
+CMD ["/bin/bash", "-c", "trap 'kill -TERM \"$producer\" \"$consumer\" 2>/dev/null; wait' TERM INT EXIT; /app/sidecar produce-upstream & producer=$!; /app/sidecar consume-downstream & consumer=$!; wait -n \"$producer\" \"$consumer\""]

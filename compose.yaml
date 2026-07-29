@@ -1,10 +1,25 @@
 services:
-  helloworld:
-    container_name: helloworld
-    platform: linux/arm64
+  sidecar:
+    container_name: ring-sidecar
     build:
       context: .
-      dockerfile: docker/Dockerfile
+      dockerfile: docker/Dockerfile.sidecar
       args:
         BASE_IMAGE: registry.chengyistudio.com/cxx/ubuntu:24.04
-    image: ${HELLOWORLD_IMAGE:-registry.chengyistudio.com/cxx/helloworld:0.2.0}
+    image: ${SIDECAR_IMAGE:-registry.chengyistudio.com/cxx/ring-sidecar:0.1.0}
+    ipc: shareable
+    shm_size: 64m
+    init: true
+
+  worker:
+    container_name: ring-worker
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+      args:
+        BASE_IMAGE: registry.chengyistudio.com/cxx/ubuntu:24.04
+    image: ${WORKER_IMAGE:-registry.chengyistudio.com/cxx/ring-worker:0.1.0}
+    ipc: service:sidecar
+    depends_on:
+      - sidecar
+    init: true

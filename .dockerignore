@@ -1,5 +1,13 @@
 *
 !docker/
-!docker/Dockerfile
+!docker/Dockerfile.sidecar
+!docker/Dockerfile.worker
 !workspace/
-!workspace/hello.cpp
+!workspace/CMakeLists.txt
+!workspace/worker.cpp
+!workspace/sdk/
+!workspace/sdk/**
+!workspace/sidecar/
+!workspace/sidecar/ringbuf.hpp
+!workspace/sidecar/ringbuf.cpp
+!workspace/sidecar/main.cpp

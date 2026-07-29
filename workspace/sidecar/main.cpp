@@ -6,8 +6,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -20,6 +22,60 @@ void stop(int) {
 void install_signal_handlers() {
     std::signal(SIGINT, stop);
     std::signal(SIGTERM, stop);
+}
+
+bool snapshot_ring(
+    const RingBuffer* ring,
+    sidecar::telemetry::RingSnapshot& output) noexcept {
+    const std::uint64_t capacity = ring->header.capacity_bytes;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const std::uint64_t read =
+            ring->header.read_position.load(std::memory_order_acquire);
+        const std::uint64_t write =
+            ring->header.write_position.load(std::memory_order_acquire);
+        if (write >= read && write - read <= capacity) {
+            output = sidecar::telemetry::RingSnapshot{
+                capacity,
+                write - read,
+                write,
+                read,
+                ring->header.shutdown.load(std::memory_order_acquire) != 0,
+            };
+            return true;
+        }
+    }
+    return false;
+}
+
+int export_telemetry() {
+    using RingHandle =
+        std::unique_ptr<RingBuffer, decltype(&ringbuf_close)>;
+
+    RingHandle upstream{
+        ringbuf_open(kUpstreamBufName),
+        &ringbuf_close,
+    };
+    RingHandle downstream{
+        ringbuf_open(kDownstreamBufName),
+        &ringbuf_close,
+    };
+    const std::vector<sidecar::telemetry::TelemetryTarget> targets{
+        {
+            "upstream",
+            [ring = upstream.get()](
+                sidecar::telemetry::RingSnapshot& output) noexcept {
+                return snapshot_ring(ring, output);
+            },
+        },
+        {
+            "downstream",
+            [ring = downstream.get()](
+                sidecar::telemetry::RingSnapshot& output) noexcept {
+                return snapshot_ring(ring, output);
+            },
+        },
+    };
+    return sidecar::telemetry::run_telemetry_exporter(running, targets);
 }
 
 bool write_all(RingBuffer* ring, const void* data, std::size_t len) {
@@ -117,7 +173,7 @@ int main(int argc, char* argv[]) {
             return consume_downstream();
         }
         if (mode == "export-telemetry") {
-            return run_telemetry_exporter(running);
+            return export_telemetry();
         }
         std::cerr << "unknown mode: " << mode << '\n';
         return 2;

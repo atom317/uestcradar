@@ -1,6 +1,5 @@
 #include "telemetry.hpp"
 
-#include "ringbuf/ringbuf.hpp"
 #include "telemetry.pb.h"
 
 #include <array>
@@ -9,20 +8,16 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
-#include <fcntl.h>
 #include <limits>
 #include <memory>
 #include <string>
 #include <system_error>
 #include <thread>
 #include <unistd.h>
-#include <arpa/inet.h>
 #include <netdb.h>
-#include <sys/mman.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
 
+namespace sidecar::telemetry {
 namespace {
 
 constexpr std::size_t kMaxDatagramSize = 1400;
@@ -30,14 +25,6 @@ constexpr unsigned long kDefaultIntervalMs = 100;
 constexpr char kDefaultHost[] = "telemetry-web";
 constexpr char kDefaultPort[] = "9900";
 constexpr char kDefaultNodeId[] = "local";
-
-struct RingSnapshot {
-    std::uint64_t capacity;
-    std::uint64_t used;
-    std::uint64_t write_position;
-    std::uint64_t read_position;
-    bool shutdown;
-};
 
 [[noreturn]] void throw_system_error(const char* operation) {
     throw std::system_error(errno, std::generic_category(), operation);
@@ -62,93 +49,6 @@ std::chrono::milliseconds sample_interval() {
     }
     return std::chrono::milliseconds{milliseconds};
 }
-
-class RingObserver {
-public:
-    explicit RingObserver(const char* name) {
-        fd_ = ::shm_open(name, O_RDONLY | O_CLOEXEC, 0);
-        if (fd_ == -1) {
-            throw_system_error("shm_open(observer)");
-        }
-
-        struct stat status {};
-        if (::fstat(fd_, &status) == -1) {
-            const int saved_errno = errno;
-            ::close(fd_);
-            errno = saved_errno;
-            throw_system_error("fstat(observer)");
-        }
-        if (status.st_size < static_cast<off_t>(kRingHeaderSize)) {
-            ::close(fd_);
-            errno = EPROTO;
-            throw_system_error("ringbuf header size");
-        }
-
-        void* address = ::mmap(
-            nullptr,
-            kRingHeaderSize,
-            PROT_READ,
-            MAP_SHARED,
-            fd_,
-            0);
-        if (address == MAP_FAILED) {
-            const int saved_errno = errno;
-            ::close(fd_);
-            errno = saved_errno;
-            throw_system_error("mmap(observer)");
-        }
-        header_ = static_cast<const RingBufferHeader*>(address);
-
-        if (header_->magic.load(std::memory_order_acquire) != kRingMagic ||
-            header_->abi_version != kRingAbiVersion ||
-            header_->header_size != kRingHeaderSize ||
-            header_->capacity_bytes == 0) {
-            ::munmap(const_cast<RingBufferHeader*>(header_), kRingHeaderSize);
-            ::close(fd_);
-            header_ = nullptr;
-            fd_ = -1;
-            errno = EPROTO;
-            throw_system_error("ringbuf ABI(observer)");
-        }
-    }
-
-    RingObserver(const RingObserver&) = delete;
-    RingObserver& operator=(const RingObserver&) = delete;
-
-    ~RingObserver() {
-        if (header_ != nullptr) {
-            ::munmap(const_cast<RingBufferHeader*>(header_), kRingHeaderSize);
-        }
-        if (fd_ != -1) {
-            ::close(fd_);
-        }
-    }
-
-    [[nodiscard]] bool snapshot(RingSnapshot& output) const noexcept {
-        const std::uint64_t capacity = header_->capacity_bytes;
-        for (int attempt = 0; attempt < 3; ++attempt) {
-            const std::uint64_t read =
-                header_->read_position.load(std::memory_order_acquire);
-            const std::uint64_t write =
-                header_->write_position.load(std::memory_order_acquire);
-            if (write >= read && write - read <= capacity) {
-                output = RingSnapshot{
-                    capacity,
-                    write - read,
-                    write,
-                    read,
-                    header_->shutdown.load(std::memory_order_acquire) != 0,
-                };
-                return true;
-            }
-        }
-        return false;
-    }
-
-private:
-    int fd_{-1};
-    const RingBufferHeader* header_{nullptr};
-};
 
 class UdpSender {
 public:
@@ -211,7 +111,7 @@ private:
 void append_metric(
     cycomm::telemetry::v1::TelemetryPacket& packet,
     const std::string& node_id,
-    const char* link_id,
+    const std::string& link_id,
     std::uint64_t sequence,
     std::uint64_t observed_unix_ns,
     const RingSnapshot& snapshot) {
@@ -229,7 +129,9 @@ void append_metric(
 
 }  // namespace
 
-int run_telemetry_exporter(volatile std::sig_atomic_t& running) {
+int run_telemetry_exporter(
+    volatile std::sig_atomic_t& running,
+    const std::vector<TelemetryTarget>& targets) {
     const std::string node_id =
         environment_or("NODE_ID", kDefaultNodeId);
     const std::string host =
@@ -238,8 +140,6 @@ int run_telemetry_exporter(volatile std::sig_atomic_t& running) {
         environment_or("TELEMETRY_PORT", kDefaultPort);
     const std::chrono::milliseconds interval = sample_interval();
 
-    RingObserver upstream{kUpstreamBufName};
-    RingObserver downstream{kDownstreamBufName};
     UdpSender sender{host, port};
     std::array<std::byte, kMaxDatagramSize> buffer{};
     std::uint64_t sequence = 0;
@@ -253,22 +153,19 @@ int run_telemetry_exporter(volatile std::sig_atomic_t& running) {
                     .count());
 
         cycomm::telemetry::v1::TelemetryPacket packet;
-        RingSnapshot snapshot{};
         ++sequence;
-        if (upstream.snapshot(snapshot)) {
+        for (const TelemetryTarget& target : targets) {
+            if (!target.fetch_snapshot) {
+                continue;
+            }
+            RingSnapshot snapshot{};
+            if (!target.fetch_snapshot(snapshot)) {
+                continue;
+            }
             append_metric(
                 packet,
                 node_id,
-                "upstream",
-                sequence,
-                observed_unix_ns,
-                snapshot);
-        }
-        if (downstream.snapshot(snapshot)) {
-            append_metric(
-                packet,
-                node_id,
-                "downstream",
+                target.link_id,
                 sequence,
                 observed_unix_ns,
                 snapshot);
@@ -287,3 +184,5 @@ int run_telemetry_exporter(volatile std::sig_atomic_t& running) {
     }
     return 0;
 }
+
+}  // namespace sidecar::telemetry

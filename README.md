@@ -25,6 +25,13 @@ uestcradar/
 │   └── kalman_tracker/           # 卡尔曼滤波航迹跟踪器
 ├── algorithm_template/           # C++ 新算子开发通用模板脚手架
 │   └── README.md                 # 模板使用与编译自检指南
+├── workspace/                    # 可独立构建的容器迁移示例源码
+│   ├── helloworld/               # 标准 C++ 持续运行示例
+│   └── qt5core/                  # Qt 5.15 + qmake + Qt Core 示例
+├── docker/                       # 跨架构镜像构建与部署入口
+│   ├── helloworld/               # 标准 C++ 的 Compose、脚本与指南
+│   ├── qt5core/                  # Qt 5.15 的 Compose 与指南
+│   └── README.md                 # Docker 示例索引
 └── LICENSE                       # 项目授权协议
 ```
 

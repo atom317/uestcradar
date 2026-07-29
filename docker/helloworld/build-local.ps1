@@ -5,16 +5,16 @@ param(
 
 $ErrorActionPreference = "Stop"
 $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
-$repositoryRoot = Split-Path -Parent $scriptDirectory
+$composeFile = Join-Path $scriptDirectory "compose.yaml"
 $previousImage = $env:HELLOWORLD_IMAGE
 
-Push-Location $repositoryRoot
+Push-Location $scriptDirectory
 
 try {
     $env:HELLOWORLD_IMAGE = $Image
 
     Write-Host "Building and loading ARM64 image: $Image"
-    & docker compose build helloworld
+    & docker compose -f $composeFile build helloworld
 
     if ($LASTEXITCODE -ne 0) {
         throw "ARM64 image build failed."

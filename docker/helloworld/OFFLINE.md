@@ -105,7 +105,7 @@ aarch64
 
 局域网只能连接 Windows 和 ARM64 服务器，不能替代 Ubuntu 软件源或外部镜像仓库。
 
-当前 `docker/Dockerfile` 首次构建需要：
+当前 `docker/helloworld/Dockerfile` 首次构建需要：
 
 - ARM64 基础镜像 `registry.chengyistudio.com/cxx/ubuntu:24.04`。
 - Dockerfile 前端镜像。
@@ -134,7 +134,7 @@ docker system prune
 ### 1. 进入项目
 
 ```powershell
-Set-Location C:\home\cxx\uestcradar
+Set-Location C:\home\cxx\uestcradar\docker\helloworld
 ```
 
 ### 2. 设置版本和镜像名
@@ -154,7 +154,7 @@ $env:HELLOWORLD_IMAGE = $image
 编辑：
 
 ```text
-workspace/hello.cpp
+C:\home\cxx\uestcradar\workspace\helloworld\main.cpp
 ```
 
 ### 4. 构建、启动并观察日志
@@ -188,9 +188,9 @@ docker buildx build `
   --platform linux/arm64 `
   --network none `
   --load `
-  -f docker/Dockerfile `
+  -f Dockerfile `
   -t $image `
-  .
+  ../..
 ```
 
 如果该命令尝试下载基础镜像、Dockerfile 前端或 APT 包后失败，说明离线依赖没有准备完整。

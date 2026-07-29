@@ -1,13 +1,16 @@
 #include "ringbuf/ringbuf.hpp"
 #include "telemetry/telemetry.hpp"
 
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <exception>
 #include <iostream>
-#include <memory>
-#include <string_view>
+#include <limits>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -24,22 +27,71 @@ void install_signal_handlers() {
     std::signal(SIGTERM, stop);
 }
 
+std::size_t ring_capacity_from_environment() {
+    const char* value = std::getenv("RING_CAPACITY_BYTES");
+    if (value == nullptr || value[0] == '\0') {
+        return kDefaultRingCapacity;
+    }
+
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long long parsed =
+        std::strtoull(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' ||
+        parsed < 4096 ||
+        parsed >
+            std::numeric_limits<std::size_t>::max() -
+                kRingHeaderSize) {
+        throw std::invalid_argument(
+            "RING_CAPACITY_BYTES must be an integer >= 4096");
+    }
+    return static_cast<std::size_t>(parsed);
+}
+
+class OwnedRing {
+public:
+    OwnedRing(const char* name, std::size_t capacity)
+        : name_(name),
+          ring_(ringbuf_create(name, capacity)) {}
+
+    OwnedRing(const OwnedRing&) = delete;
+    OwnedRing& operator=(const OwnedRing&) = delete;
+
+    ~OwnedRing() {
+        ringbuf_shutdown(ring_);
+        ringbuf_close(ring_);
+        ringbuf_unlink(name_);
+    }
+
+    [[nodiscard]] RingBuffer* get() const noexcept {
+        return ring_;
+    }
+
+private:
+    const char* name_;
+    RingBuffer* ring_;
+};
+
 bool snapshot_ring(
     const RingBuffer* ring,
     sidecar::telemetry::RingSnapshot& output) noexcept {
-    const std::uint64_t capacity = ring->header.capacity_bytes;
+    const std::uint64_t capacity =
+        ring->header->capacity_bytes;
     for (int attempt = 0; attempt < 3; ++attempt) {
         const std::uint64_t read =
-            ring->header.read_position.load(std::memory_order_acquire);
+            ring->header->read_position.load(
+                std::memory_order_acquire);
         const std::uint64_t write =
-            ring->header.write_position.load(std::memory_order_acquire);
+            ring->header->write_position.load(
+                std::memory_order_acquire);
         if (write >= read && write - read <= capacity) {
             output = sidecar::telemetry::RingSnapshot{
                 capacity,
                 write - read,
                 write,
                 read,
-                ring->header.shutdown.load(std::memory_order_acquire) != 0,
+                ring->header->shutdown.load(
+                    std::memory_order_acquire) != 0,
             };
             return true;
         }
@@ -47,139 +99,68 @@ bool snapshot_ring(
     return false;
 }
 
-int export_telemetry() {
-    using RingHandle =
-        std::unique_ptr<RingBuffer, decltype(&ringbuf_close)>;
-
-    RingHandle upstream{
-        ringbuf_open(kUpstreamBufName),
-        &ringbuf_close,
-    };
-    RingHandle downstream{
-        ringbuf_open(kDownstreamBufName),
-        &ringbuf_close,
-    };
-    const std::vector<sidecar::telemetry::TelemetryTarget> targets{
-        {
-            "upstream",
-            [ring = upstream.get()](
-                sidecar::telemetry::RingSnapshot& output) noexcept {
-                return snapshot_ring(ring, output);
-            },
-        },
-        {
-            "downstream",
-            [ring = downstream.get()](
-                sidecar::telemetry::RingSnapshot& output) noexcept {
-                return snapshot_ring(ring, output);
-            },
-        },
-    };
-    return sidecar::telemetry::run_telemetry_exporter(running, targets);
-}
-
-bool write_all(RingBuffer* ring, const void* data, std::size_t len) {
-    const auto* bytes = static_cast<const std::byte*>(data);
-    std::size_t written = 0;
-    while (running != 0 && written < len) {
-        const std::int32_t result =
-            ringbuf_write(ring, bytes + written, len - written);
-        if (result < 0 || ringbuf_is_shutdown(ring)) {
-            return false;
-        }
-        if (result == 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
-        written += static_cast<std::size_t>(result);
-    }
-    return written == len;
-}
-
-bool read_exact(RingBuffer* ring, void* data, std::size_t len) {
-    auto* bytes = static_cast<std::byte*>(data);
-    std::size_t read = 0;
-    while (running != 0 && read < len) {
-        const std::int32_t result =
-            ringbuf_read(ring, bytes + read, len - read);
-        if (result < 0 || ringbuf_is_shutdown(ring)) {
-            return false;
-        }
-        if (result == 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
-        read += static_cast<std::size_t>(result);
-    }
-    return read == len;
-}
-
-int produce_upstream() {
-    RingBuffer* ring = ringbuf_create(kUpstreamBufName);
-    std::cout << "sidecar: created " << kUpstreamBufName << std::endl;
-
-    std::vector<std::int32_t> chunk(16384, 0); // 64KB chunk
-    std::int32_t chunk_id = 0;
-    while (running != 0) {
-        chunk[0] = chunk_id;
-        if (!write_all(ring, chunk.data(), chunk.size() * sizeof(std::int32_t))) {
-            break;
-        }
-        std::cout << "upstream <- [Chunk " << chunk_id << "] 64KB" << std::endl;
-        ++chunk_id;
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-
-    ringbuf_shutdown(ring);
-    ringbuf_close(ring);
-    ringbuf_unlink(kUpstreamBufName);
-    return 0;
-}
-
-int consume_downstream() {
-    RingBuffer* ring = ringbuf_create(kDownstreamBufName);
-    std::cout << "sidecar: created " << kDownstreamBufName << std::endl;
-
-    std::vector<std::int32_t> chunk(4096, 0); // 16KB chunk
-    while (running != 0) {
-        if (!read_exact(ring, chunk.data(), chunk.size() * sizeof(std::int32_t))) {
-            break;
-        }
-        std::cout << "downstream -> [Chunk " << chunk[0] << "] 16KB consumed" << std::endl;
-        std::this_thread::sleep_for(std::chrono::milliseconds(20)); // intentional slow down
-    }
-
-    ringbuf_shutdown(ring);
-    ringbuf_close(ring);
-    ringbuf_unlink(kDownstreamBufName);
-    return 0;
-}
-
 }  // namespace
 
-int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        std::cerr
-            << "usage: sidecar produce-upstream|consume-downstream|"
-               "export-telemetry\n";
-        return 2;
-    }
-
+int main() {
     install_signal_handlers();
 
     try {
-        const std::string_view mode{argv[1]};
-        if (mode == "produce-upstream") {
-            return produce_upstream();
+        const std::size_t capacity =
+            ring_capacity_from_environment();
+        OwnedRing upstream{kUpstreamBufName, capacity};
+        OwnedRing downstream{kDownstreamBufName, capacity};
+
+        const std::vector<sidecar::telemetry::TelemetryTarget> targets{
+            {
+                "upstream",
+                [ring = upstream.get()](
+                    sidecar::telemetry::RingSnapshot& output) noexcept {
+                    return snapshot_ring(ring, output);
+                },
+            },
+            {
+                "downstream",
+                [ring = downstream.get()](
+                    sidecar::telemetry::RingSnapshot& output) noexcept {
+                    return snapshot_ring(ring, output);
+                },
+            },
+        };
+
+        std::exception_ptr telemetry_error;
+        std::thread telemetry_thread([&] {
+            try {
+                if (sidecar::telemetry::run_telemetry_exporter(
+                        running,
+                        targets) != 0) {
+                    throw std::runtime_error(
+                        "telemetry exporter failed");
+                }
+            } catch (...) {
+                telemetry_error = std::current_exception();
+                running = 0;
+            }
+        });
+
+        std::cout
+            << "sidecar: upstream and downstream ready, capacity="
+            << capacity << " bytes each" << std::endl;
+        std::cout
+            << "sidecar: network/forwarder disabled in this milestone"
+            << std::endl;
+
+        while (running != 0) {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(100));
         }
-        if (mode == "consume-downstream") {
-            return consume_downstream();
+
+        ringbuf_shutdown(upstream.get());
+        ringbuf_shutdown(downstream.get());
+        telemetry_thread.join();
+        if (telemetry_error != nullptr) {
+            std::rethrow_exception(telemetry_error);
         }
-        if (mode == "export-telemetry") {
-            return export_telemetry();
-        }
-        std::cerr << "unknown mode: " << mode << '\n';
-        return 2;
+        return 0;
     } catch (const std::exception& error) {
         std::cerr << "sidecar: " << error.what() << '\n';
         return 1;

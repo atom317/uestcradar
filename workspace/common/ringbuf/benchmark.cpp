@@ -32,9 +32,13 @@ BlockBenchmarkResult run_block_benchmark(
     std::uint64_t iterations) {
 
     const std::string name = name_prefix + "_" + std::to_string(block_size);
-    RingBuffer* ring = ringbuf_create(name.c_str());
+    constexpr std::size_t kBenchmarkCapacity = 3 * 1024 * 1024 + 123;
+    RingBuffer* ring = ringbuf_create(name.c_str(), kBenchmarkCapacity);
     if (!ring) {
         throw std::runtime_error("ringbuf_create failed for " + name);
+    }
+    if (ringbuf_capacity(ring) != kBenchmarkCapacity) {
+        throw std::runtime_error("creator observed an invalid capacity");
     }
 
     const pid_t consumer_pid = ::fork();
@@ -49,6 +53,10 @@ BlockBenchmarkResult run_block_benchmark(
     if (consumer_pid == 0) {
         ringbuf_close(ring);
         RingBuffer* consumer = ringbuf_open(name.c_str());
+        if (ringbuf_capacity(consumer) != kBenchmarkCapacity) {
+            ringbuf_close(consumer);
+            ::_exit(1);
+        }
         std::vector<std::byte> recv_buf(block_size);
         bool valid = true;
 

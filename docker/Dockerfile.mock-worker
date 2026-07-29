@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1
+
+ARG BASE_IMAGE=registry.chengyistudio.com/cxx/ubuntu:24.04
+
+FROM ${BASE_IMAGE} AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY workspace/common/ringbuf/ ./common/ringbuf/
+COPY workspace/tools/mock_worker.cpp ./tools/mock_worker.cpp
+RUN mkdir -p /out \
+    && g++ -std=c++20 -O2 -Wall -Wextra -Wpedantic \
+       -static-libgcc -static-libstdc++ \
+       -I/src/common \
+       common/ringbuf/ringbuf.cpp tools/mock_worker.cpp \
+       -pthread \
+       -o /out/mock-worker
+
+FROM ${BASE_IMAGE} AS runtime
+
+WORKDIR /app
+COPY --from=builder /out/mock-worker /app/mock-worker
+
+ENTRYPOINT ["/app/mock-worker"]

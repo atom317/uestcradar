@@ -1,73 +1,37 @@
 services:
-  # ==============================
-  # Node Alpha
-  # ==============================
-  worker-alpha:
-    container_name: worker-alpha
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.sidecar
-      args:
-        BASE_IMAGE: registry.chengyistudio.com/cxx/ubuntu:24.04
-    image: ${WORKER_IMAGE:-registry.chengyistudio.com/cxx/ring-sidecar:0.1.0}
-    command: ["produce-upstream"]
-    ipc: shareable
-    shm_size: 64m
-    init: true
-
-  consumer-alpha:
-    container_name: consumer-alpha
-    image: ${WORKER_IMAGE:-registry.chengyistudio.com/cxx/ring-sidecar:0.1.0}
-    command: ["consume-downstream"]
-    ipc: service:worker-alpha
-    init: true
-    depends_on:
-      - worker-alpha
-
+  # Each Sidecar owns both RingBuffers and runs telemetry in-process.
   sidecar-alpha:
     container_name: sidecar-alpha
     build:
       context: .
       dockerfile: docker/Dockerfile.sidecar
       args:
-        BASE_IMAGE: registry.chengyistudio.com/cxx/ubuntu:24.04
+        BASE_IMAGE: ${BASE_IMAGE:-registry.chengyistudio.com/cxx/ubuntu:24.04}
     image: ${SIDECAR_IMAGE:-registry.chengyistudio.com/cxx/ring-sidecar:0.1.0}
-    command: ["export-telemetry"]
-    ipc: service:worker-alpha
+    ipc: shareable
+    shm_size: ${ALPHA_SHM_SIZE:-64m}
     init: true
     environment:
       NODE_ID: Radar-Alpha
+      RING_CAPACITY_BYTES: ${ALPHA_RING_CAPACITY_BYTES:-8388608}
       TELEMETRY_HOST: ${TELEMETRY_HOST:-telemetry-web}
       TELEMETRY_PORT: ${TELEMETRY_PORT:-9900}
       SAMPLE_INTERVAL: ${SAMPLE_INTERVAL:-100}
     depends_on:
-      - worker-alpha
-      - consumer-alpha
+      - telemetry-web
 
-  # ==============================
-  # Node Beta
-  # ==============================
-  worker-beta:
-    container_name: worker-beta
+  mock-worker-alpha:
+    container_name: mock-worker-alpha
     build:
       context: .
-      dockerfile: docker/Dockerfile.sidecar
+      dockerfile: docker/Dockerfile.mock-worker
       args:
-        BASE_IMAGE: registry.chengyistudio.com/cxx/ubuntu:24.04
-    image: ${WORKER_IMAGE:-registry.chengyistudio.com/cxx/ring-sidecar:0.1.0}
-    command: ["consume-downstream"]
-    ipc: shareable
-    shm_size: 64m
-    init: true
-
-  producer-beta:
-    container_name: producer-beta
-    image: ${WORKER_IMAGE:-registry.chengyistudio.com/cxx/ring-sidecar:0.1.0}
-    command: ["produce-upstream"]
-    ipc: service:worker-beta
+        BASE_IMAGE: ${BASE_IMAGE:-registry.chengyistudio.com/cxx/ubuntu:24.04}
+    image: ${MOCK_WORKER_IMAGE:-registry.chengyistudio.com/cxx/ring-mock-worker:0.1.0}
+    ipc: service:sidecar-alpha
     init: true
     depends_on:
-      - worker-beta
+      - sidecar-alpha
 
   sidecar-beta:
     container_name: sidecar-beta
@@ -75,23 +39,33 @@ services:
       context: .
       dockerfile: docker/Dockerfile.sidecar
       args:
-        BASE_IMAGE: registry.chengyistudio.com/cxx/ubuntu:24.04
+        BASE_IMAGE: ${BASE_IMAGE:-registry.chengyistudio.com/cxx/ubuntu:24.04}
     image: ${SIDECAR_IMAGE:-registry.chengyistudio.com/cxx/ring-sidecar:0.1.0}
-    command: ["export-telemetry"]
-    ipc: service:worker-beta
+    ipc: shareable
+    shm_size: ${BETA_SHM_SIZE:-64m}
     init: true
     environment:
       NODE_ID: Radar-Beta
+      RING_CAPACITY_BYTES: ${BETA_RING_CAPACITY_BYTES:-8388608}
       TELEMETRY_HOST: ${TELEMETRY_HOST:-telemetry-web}
       TELEMETRY_PORT: ${TELEMETRY_PORT:-9900}
       SAMPLE_INTERVAL: ${SAMPLE_INTERVAL:-100}
     depends_on:
-      - worker-beta
-      - producer-beta
+      - telemetry-web
 
-  # ==============================
-  # Web UI (监控中心)
-  # ==============================
+  mock-worker-beta:
+    container_name: mock-worker-beta
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.mock-worker
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-registry.chengyistudio.com/cxx/ubuntu:24.04}
+    image: ${MOCK_WORKER_IMAGE:-registry.chengyistudio.com/cxx/ring-mock-worker:0.1.0}
+    ipc: service:sidecar-beta
+    init: true
+    depends_on:
+      - sidecar-beta
+
   telemetry-web:
     container_name: telemetry-web
     build:

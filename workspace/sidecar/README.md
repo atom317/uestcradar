@@ -56,7 +56,7 @@
 
 ## 3. 内部模块职责与物理解耦边界
 
-系统的物理指挥官 `main.cpp`（组合根 Composition Root）负责在启动时统一实例化并组装以下 **4 大解耦模块**：
+系统的物理指挥官 `main.cpp`（组合根 Composition Root）负责在启动时统一实例化并组装各模块。当前里程碑只启用 `ringbuf` 与 `telemetry`；`network` 和 `forwarder` 保留为后续接入点，不在主循环中伪造搬运逻辑。
 
 ```text
                                   main.cpp (组合根 Composition Root)
@@ -78,7 +78,7 @@
    └───────────────────────────────┘ └───────────────────────────────┘ └───────────────────────────────┘
 ```
 
-### 3.1 `ringbuf/` 模块（本机 Shm 数据面 基础设施）
+### 3.1 `common/ringbuf/` 模块（本机 Shm 数据面基础设施）
 
 * **物理使命**：提供共享内存缓冲区的创建、映射与无锁零拷贝读写；
 * **解耦规则**：纯粹处理本机内存，100% 不感知网络模块、Telemetry 模块以及 Forwarder 的存在。
@@ -90,8 +90,8 @@
 
 ### 3.3 `telemetry/` 模块（旁路观察者）
 
-* **物理使命**：定时（100ms）读取共享内存头部快照，打包非阻塞 UDP 发往中央 Web 监控节点；
-* **解耦规则**：纯粹只读观察者，崩溃或丢包绝不回压主数据链路。最终应由 `main.cpp` 拉起为独立的后台旁路线程。
+* **物理使命**：定时（100ms）调用 `main.cpp` 注入的快照回调，打包非阻塞 UDP 发往中央 Web 监控节点；
+* **解耦规则**：不引用 `ringbuf`，不调用共享内存 API。崩溃或丢包绝不回压主数据链路，由 `main.cpp` 拉起为后台旁路线程。
 
 ### 3.4 `forwarder/` 模块（转发引擎/数据泵）
 
@@ -110,16 +110,11 @@
 ```text
 workspace/sidecar/
 ├── README.md               # 本架构设计规范文档
-├── main.cpp                # 唯一组合根：依赖组装、命令行解析与主循环
+├── main.cpp                # 唯一组合根：配置、资源组装与主循环
 ├── telemetry/              # 监控
 │   ├── README.md           # 监控模块极简设计规范
 │   ├── telemetry.hpp
 │   └── telemetry.cpp
-├── ringbuf/                # 无锁 POSIX Shared Memory 环形缓冲区
-│   ├── README.md           # 缓冲区模块极简设计规范
-│   ├── ringbuf.hpp
-│   ├── ringbuf.cpp
-│   └── benchmark.cpp
 ├── network/                # 极简 UCX / RDMA 物理网络搬运模块
 │   ├── README.md           # 网络模块极简设计规范
 │   ├── ucx_transport.hpp   # UCXTransport 声明
@@ -132,6 +127,8 @@ workspace/sidecar/
     └── forwarder.cpp       # 引擎高性能死循环实现
 ```
 
+`ringbuf` 的物理位置为 `workspace/common/ringbuf/`，它是 Sidecar 与 SDK 共享的 ABI 契约，不属于任一方的私有实现。
+
 ---
 
 ## 5. 架构约束与红线 (Architecture Rules)
@@ -140,3 +137,19 @@ workspace/sidecar/
 2. **严格层级规则**：仅允许处于应用调度层的 `forwarder` 和 `main.cpp` 引用基础设施层的头文件（允许向名单向依赖）。
 3. **极致轻量红线**：网络模块只允许封装最底层的 UCX 原生 API，绝不引入复杂的 RPC 框架或动态路由表。
 4. **控制反转 (IoC)**：所有底层资源建立与销毁，必须统一发生于 `main.cpp`（组合根）中，严禁在 `forwarder` 中私下创建共享内存或网卡端点。
+
+---
+
+## 6. 当前启动模型
+
+`sidecar` 不接收模式参数。进程启动后总是创建 `/upstreambuf` 和 `/downstreambuf` 两个 SPSC 字节环，并在后台启动 telemetry。两个环使用相同的 `RING_CAPACITY_BYTES`，未配置时默认为 1 MiB。
+
+测试数据生产和消费位于独立的 `workspace/tools/mock_worker.cpp`，不属于 Sidecar。Compose 为每个节点启动一个 Sidecar 和一个共享其 IPC namespace 的 mock worker：
+
+```bash
+ALPHA_RING_CAPACITY_BYTES=8388608 \
+BETA_RING_CAPACITY_BYTES=16777216 \
+docker compose up --build
+```
+
+`shm_size` 必须大于两个数据区与两个 4096 字节控制头的总和，建议保留额外余量。当前尚未接入 network/forwarder，因此 mock worker 写入的 upstream 会在填满后体现背压，downstream 在没有外部写入时保持为空；Sidecar 不做隐式本地回环。

@@ -5,9 +5,22 @@ project(cycomm_sdk VERSION 1.0.0 LANGUAGES CXX)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
+# The SDK carries its RingBuffer ABI dependency so that this directory can be
+# copied and built without a Sidecar checkout or access to the monorepo.
+set(CYCOMM_RINGBUF_SOURCE_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/vendor/ringbuf"
+    CACHE PATH "Path to the SDK's vendored RingBuffer source")
+if(NOT EXISTS "${CYCOMM_RINGBUF_SOURCE_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR
+        "CYCOMM_RINGBUF_SOURCE_DIR must contain the vendored RingBuffer source")
+endif()
+add_subdirectory(
+    "${CYCOMM_RINGBUF_SOURCE_DIR}"
+    "${CMAKE_CURRENT_BINARY_DIR}/ringbuf"
+)
+
 add_library(uestcradar_sdk SHARED
     src/sdk.cpp
-    src/ringbuf.cpp
 )
 add_library(cycomm::sdk ALIAS uestcradar_sdk)
 
@@ -20,6 +33,7 @@ set_target_properties(uestcradar_sdk PROPERTIES
 
 target_compile_features(uestcradar_sdk PUBLIC cxx_std_20)
 target_compile_definitions(uestcradar_sdk PRIVATE CYCOMM_SDK_BUILD)
+target_link_libraries(uestcradar_sdk PRIVATE uestcradar::ringbuf)
 target_include_directories(uestcradar_sdk
     PUBLIC
         "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"

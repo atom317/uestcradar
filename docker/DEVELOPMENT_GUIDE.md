@@ -2,8 +2,8 @@
 
 本文以 `workspace/hello.cpp` 为例，说明完整开发链路：
 
-如果部署环境不能访问 Harbor，请改用
-[无网络版开发与部署指南](OFFLINE_DEVELOPMENT_GUIDE.md)。
+如果部署环境不能访问互联网和 Harbor，但 Windows 与 ARM64 服务器局域网互通，请改用
+[无互联网、局域网版开发与部署指南](OFFLINE_DEVELOPMENT_GUIDE.md)。
 
 ```text
 Windows AMD64 修改源码

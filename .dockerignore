@@ -2,13 +2,10 @@
 !docker/
 !docker/Dockerfile.sidecar
 !docker/Dockerfile.worker
-!docker/Dockerfile.mock-worker
 !docker/sidecar-entrypoint.sh
 !workspace/
 !workspace/CMakeLists.txt
 !workspace/worker.cpp
-!workspace/tools/
-!workspace/tools/mock_worker.cpp
 !workspace/sdk/
 !workspace/sdk/**
 !workspace/common/
@@ -21,6 +18,9 @@
 !workspace/sidecar/telemetry/
 !workspace/sidecar/telemetry/telemetry.hpp
 !workspace/sidecar/telemetry/telemetry.cpp
+!workspace/sidecar/tools/
+!workspace/sidecar/tools/jitter_io.hpp
+!workspace/sidecar/tools/jitter_io.cpp
 !workspace/sidecar/network/
 !workspace/sidecar/network/**
 !workspace/proto/

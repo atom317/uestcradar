@@ -101,7 +101,7 @@
 ### 3.5 `main.cpp`（物理组合根 Composition Root）
 
 * **物理使命**：全局唯一的物理控制中心，负责解析配置、创建底层句柄，然后将句柄注入给 `forwarder` 和 `telemetry`；全盘接管进程生命周期。
-* **解耦红线**：严禁在此堆砌任何雷达业务的模拟数据生产与消费逻辑（Mock Worker 逻辑应当拆分到独立的外部工具中）。
+* **解耦红线**：严禁在此堆砌任何雷达业务的模拟数据生产与消费逻辑。临时网络仿真仅可作为 `tools/` 的可替换测试适配器，由 `main.cpp` 注入既有 RingBuffer 后调用。
 
 ---
 
@@ -115,6 +115,9 @@ workspace/sidecar/
 │   ├── README.md           # 监控模块极简设计规范
 │   ├── telemetry.hpp
 │   └── telemetry.cpp
+├── tools/                  # 仅测试期的 Sidecar 侧网络仿真适配器
+│   ├── jitter_io.hpp       # 注入 RingBuffer 的抖动源/汇声明
+│   └── jitter_io.cpp       # upstream 写入、downstream 读取
 ├── network/                # 极简 UCX / RDMA 物理网络搬运模块
 │   ├── README.md           # 网络模块极简设计规范
 │   ├── ucx_transport.hpp   # UCXTransport 声明
@@ -134,7 +137,7 @@ workspace/sidecar/
 ## 5. 架构约束与红线 (Architecture Rules)
 
 1. **零横向交叉依赖红线**：基础设施层的 `ringbuf` 与 `network` 之间**绝对禁止出现任何形式的头文件互相 `#include`**；
-2. **严格层级规则**：仅允许处于应用调度层的 `forwarder` 和 `main.cpp` 引用基础设施层的头文件（允许向名单向依赖）。
+2. **严格层级规则**：仅允许处于应用调度层的 `forwarder`、`main.cpp` 和测试期 `tools/` 适配器引用基础设施层的头文件（允许向下依赖）。
 3. **极致轻量红线**：网络模块只允许封装最底层的 UCX 原生 API，绝不引入复杂的 RPC 框架或动态路由表。
 4. **控制反转 (IoC)**：所有底层资源建立与销毁，必须统一发生于 `main.cpp`（组合根）中，严禁在 `forwarder` 中私下创建共享内存或网卡端点。
 
@@ -144,7 +147,9 @@ workspace/sidecar/
 
 `sidecar` 不接收模式参数。进程启动后总是创建 `/upstreambuf` 和 `/downstreambuf` 两个 SPSC 字节环，并在后台启动 telemetry。两个环使用相同的 `RING_CAPACITY_BYTES`，未配置时默认为 1 MiB。
 
-测试数据生产和消费位于独立的 `workspace/tools/mock_worker.cpp`，不属于 Sidecar。Compose 为每个节点启动一个 Sidecar 和一个共享其 IPC namespace 的 mock worker：
+在尚未接入真实 network/forwarder 的测试阶段，`sidecar/tools/jitter_io.*` 由 `main.cpp` 调用：抖动数据源向 worker-facing 的 upstream 注入模拟网络输入，抖动数据汇从 worker-facing 的 downstream 取走模拟网络输出。它们不创建共享内存，也不是独立可执行文件。
+
+Compose 为每个节点启动一个 Sidecar 和一个共享 IPC namespace 的实际 worker：
 
 ```bash
 ALPHA_RING_CAPACITY_BYTES=8388608 \
@@ -152,4 +157,4 @@ BETA_RING_CAPACITY_BYTES=16777216 \
 docker compose up --build
 ```
 
-`shm_size` 必须大于两个数据区与两个 4096 字节控制头的总和，建议保留额外余量。当前尚未接入 network/forwarder，因此 mock worker 写入的 upstream 会在填满后体现背压，downstream 在没有外部写入时保持为空；Sidecar 不做隐式本地回环。
+`shm_size` 必须大于两个数据区与两个 4096 字节控制头的总和，建议保留额外余量。真实 network/forwarder 接入后，将以对应实现替换这些仅用于演示水位与背压的测试循环。

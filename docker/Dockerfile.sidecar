@@ -24,7 +24,8 @@ RUN mkdir -p /out /src/generated \
     && g++ -std=c++20 -O2 -Wall -Wextra -Wpedantic \
        -static-libgcc -static-libstdc++ \
        -I/src/generated -I/src/common -I/src/sidecar \
-       common/ringbuf/ringbuf.cpp sidecar/telemetry/telemetry.cpp sidecar/main.cpp \
+       common/ringbuf/ringbuf.cpp sidecar/telemetry/telemetry.cpp \
+       sidecar/tools/jitter_io.cpp sidecar/main.cpp \
        generated/telemetry.pb.cc \
        "${protobuf_lite_archive}" -pthread \
        -o /out/sidecar

@@ -1,5 +1,6 @@
 #include "ringbuf/ringbuf.hpp"
 #include "telemetry/telemetry.hpp"
+#include "tools/jitter_io.hpp"
 
 #include <cerrno>
 #include <chrono>
@@ -141,12 +142,20 @@ int main() {
                 running = 0;
             }
         });
+        std::thread jitter_source_thread([&] {
+            sidecar::tools::run_jitter_data_source(
+                running, upstream.get());
+        });
+        std::thread jitter_sink_thread([&] {
+            sidecar::tools::run_jitter_data_sink(
+                running, downstream.get());
+        });
 
         std::cout
             << "sidecar: upstream and downstream ready, capacity="
             << capacity << " bytes each" << std::endl;
         std::cout
-            << "sidecar: network/forwarder disabled in this milestone"
+            << "sidecar: jitter network test tools enabled"
             << std::endl;
 
         while (running != 0) {
@@ -156,6 +165,8 @@ int main() {
 
         ringbuf_shutdown(upstream.get());
         ringbuf_shutdown(downstream.get());
+        jitter_source_thread.join();
+        jitter_sink_thread.join();
         telemetry_thread.join();
         if (telemetry_error != nullptr) {
             std::rethrow_exception(telemetry_error);

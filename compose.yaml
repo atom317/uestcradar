@@ -20,14 +20,14 @@ services:
     depends_on:
       - telemetry-web
 
-  mock-worker-alpha:
-    container_name: mock-worker-alpha
+  worker-alpha:
+    container_name: worker-alpha
     build:
       context: .
-      dockerfile: docker/Dockerfile.mock-worker
+      dockerfile: docker/Dockerfile.worker
       args:
         BASE_IMAGE: ${BASE_IMAGE:-registry.chengyistudio.com/cxx/ubuntu:24.04}
-    image: ${MOCK_WORKER_IMAGE:-registry.chengyistudio.com/cxx/ring-mock-worker:0.1.0}
+    image: ${WORKER_IMAGE:-registry.chengyistudio.com/cxx/ring-worker:0.1.0}
     ipc: service:sidecar-alpha
     init: true
     depends_on:
@@ -53,14 +53,14 @@ services:
     depends_on:
       - telemetry-web
 
-  mock-worker-beta:
-    container_name: mock-worker-beta
+  worker-beta:
+    container_name: worker-beta
     build:
       context: .
-      dockerfile: docker/Dockerfile.mock-worker
+      dockerfile: docker/Dockerfile.worker
       args:
         BASE_IMAGE: ${BASE_IMAGE:-registry.chengyistudio.com/cxx/ubuntu:24.04}
-    image: ${MOCK_WORKER_IMAGE:-registry.chengyistudio.com/cxx/ring-mock-worker:0.1.0}
+    image: ${WORKER_IMAGE:-registry.chengyistudio.com/cxx/ring-worker:0.1.0}
     ipc: service:sidecar-beta
     init: true
     depends_on:

@@ -17,6 +17,11 @@ import (
 	webassets "uestcradar/telemetry/web"
 )
 
+const (
+	nodeLeaseTTL     = 3 * time.Second
+	nodeScanInterval = 500 * time.Millisecond
+)
+
 // Config controls UDP ingestion, HTTP serving, and bounded history.
 type Config struct {
 	UDPAddress  string
@@ -39,23 +44,11 @@ func Run(parent context.Context, config Config) error {
 	defer cancel()
 
 	store := NewStore(config.HistorySize)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(writer http.ResponseWriter, _ *http.Request) {
-		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if _, err := writer.Write(webassets.Index); err != nil {
-			return
-		}
-	})
-	mux.HandleFunc("/api/metrics", func(writer http.ResponseWriter, _ *http.Request) {
-		writer.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(writer).Encode(store.Snapshot()); err != nil {
-			http.Error(writer, err.Error(), http.StatusInternalServerError)
-		}
-	})
+	go scanNodeLeases(ctx, store, nodeLeaseTTL, nodeScanInterval)
 
 	httpServer := &http.Server{
 		Addr:              config.HTTPAddress,
-		Handler:           mux,
+		Handler:           newHTTPHandler(store),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	errorsChannel := make(chan error, 2)
@@ -91,6 +84,48 @@ func Run(parent context.Context, config Config) error {
 	return runError
 }
 
+func newHTTPHandler(store *Store) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if _, err := writer.Write(webassets.Index); err != nil {
+			return
+		}
+	})
+	mux.HandleFunc("/api/metrics", func(writer http.ResponseWriter, _ *http.Request) {
+		writeJSON(writer, store.MetricsSnapshot())
+	})
+	mux.HandleFunc("/api/nodes", func(writer http.ResponseWriter, _ *http.Request) {
+		writeJSON(writer, store.NodesSnapshot())
+	})
+	return mux
+}
+
+func writeJSON(writer http.ResponseWriter, value any) {
+	writer.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(writer).Encode(value); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func scanNodeLeases(
+	ctx context.Context,
+	store *Store,
+	ttl time.Duration,
+	interval time.Duration,
+) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case now := <-ticker.C:
+			store.MarkOffline(now, ttl)
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 func receiveUDP(ctx context.Context, address string, store *Store) error {
 	connection, err := net.ListenPacket("udp", address)
 	if err != nil {
@@ -124,8 +159,9 @@ func receiveUDP(ctx context.Context, address string, store *Store) error {
 		if err := proto.Unmarshal(buffer[:size], packet); err != nil {
 			continue
 		}
+		receivedAt := time.Now()
 		for _, metric := range packet.Rings {
-			store.Update(metric)
+			store.Update(metric, receivedAt)
 		}
 	}
 }

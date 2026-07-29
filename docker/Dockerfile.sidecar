@@ -64,6 +64,5 @@ FROM ${BASE_IMAGE} AS runtime
 
 WORKDIR /app
 COPY --from=builder /out/sidecar /app/sidecar
-COPY --chmod=755 docker/sidecar-entrypoint.sh /app/sidecar-entrypoint.sh
 
-ENTRYPOINT ["/app/sidecar-entrypoint.sh"]
+ENTRYPOINT ["/app/sidecar"]

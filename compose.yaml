@@ -1,34 +1,97 @@
 services:
-  sidecar:
-    container_name: ring-sidecar
+  # ==============================
+  # Node Alpha
+  # ==============================
+  worker-alpha:
+    container_name: worker-alpha
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.sidecar
+      args:
+        BASE_IMAGE: registry.chengyistudio.com/cxx/ubuntu:24.04
+    image: ${WORKER_IMAGE:-registry.chengyistudio.com/cxx/ring-sidecar:0.1.0}
+    command: ["produce-upstream"]
+    ipc: shareable
+    shm_size: 64m
+    init: true
+
+  consumer-alpha:
+    container_name: consumer-alpha
+    image: ${WORKER_IMAGE:-registry.chengyistudio.com/cxx/ring-sidecar:0.1.0}
+    command: ["consume-downstream"]
+    ipc: service:worker-alpha
+    init: true
+    depends_on:
+      - worker-alpha
+
+  sidecar-alpha:
+    container_name: sidecar-alpha
     build:
       context: .
       dockerfile: docker/Dockerfile.sidecar
       args:
         BASE_IMAGE: registry.chengyistudio.com/cxx/ubuntu:24.04
     image: ${SIDECAR_IMAGE:-registry.chengyistudio.com/cxx/ring-sidecar:0.1.0}
-    ipc: shareable
-    shm_size: 64m
+    command: ["export-telemetry"]
+    ipc: service:worker-alpha
     init: true
     environment:
-      NODE_ID: ${NODE_ID:-local}
+      NODE_ID: Radar-Alpha
       TELEMETRY_HOST: ${TELEMETRY_HOST:-telemetry-web}
       TELEMETRY_PORT: ${TELEMETRY_PORT:-9900}
       SAMPLE_INTERVAL: ${SAMPLE_INTERVAL:-100}
+    depends_on:
+      - worker-alpha
+      - consumer-alpha
 
-  worker:
-    container_name: ring-worker
+  # ==============================
+  # Node Beta
+  # ==============================
+  worker-beta:
+    container_name: worker-beta
     build:
       context: .
-      dockerfile: docker/Dockerfile.worker
+      dockerfile: docker/Dockerfile.sidecar
       args:
         BASE_IMAGE: registry.chengyistudio.com/cxx/ubuntu:24.04
-    image: ${WORKER_IMAGE:-registry.chengyistudio.com/cxx/ring-worker:0.1.0}
-    ipc: service:sidecar
-    depends_on:
-      - sidecar
+    image: ${WORKER_IMAGE:-registry.chengyistudio.com/cxx/ring-sidecar:0.1.0}
+    command: ["consume-downstream"]
+    ipc: shareable
+    shm_size: 64m
     init: true
 
+  producer-beta:
+    container_name: producer-beta
+    image: ${WORKER_IMAGE:-registry.chengyistudio.com/cxx/ring-sidecar:0.1.0}
+    command: ["produce-upstream"]
+    ipc: service:worker-beta
+    init: true
+    depends_on:
+      - worker-beta
+
+  sidecar-beta:
+    container_name: sidecar-beta
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.sidecar
+      args:
+        BASE_IMAGE: registry.chengyistudio.com/cxx/ubuntu:24.04
+    image: ${SIDECAR_IMAGE:-registry.chengyistudio.com/cxx/ring-sidecar:0.1.0}
+    command: ["export-telemetry"]
+    ipc: service:worker-beta
+    init: true
+    environment:
+      NODE_ID: Radar-Beta
+      TELEMETRY_HOST: ${TELEMETRY_HOST:-telemetry-web}
+      TELEMETRY_PORT: ${TELEMETRY_PORT:-9900}
+      SAMPLE_INTERVAL: ${SAMPLE_INTERVAL:-100}
+    depends_on:
+      - worker-beta
+      - producer-beta
+
+  # ==============================
+  # Web UI (监控中心)
+  # ==============================
   telemetry-web:
     container_name: telemetry-web
     build:

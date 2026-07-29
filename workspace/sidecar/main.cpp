@@ -118,14 +118,16 @@ int produce_upstream() {
     RingBuffer* ring = ringbuf_create(kUpstreamBufName);
     std::cout << "sidecar: created " << kUpstreamBufName << std::endl;
 
-    std::int32_t value = 0;
+    std::vector<std::int32_t> chunk(16384, 0); // 64KB chunk
+    std::int32_t chunk_id = 0;
     while (running != 0) {
-        if (!write_all(ring, &value, sizeof(value))) {
+        chunk[0] = chunk_id;
+        if (!write_all(ring, chunk.data(), chunk.size() * sizeof(std::int32_t))) {
             break;
         }
-        std::cout << "upstream <- " << value << std::endl;
-        ++value;
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        std::cout << "upstream <- [Chunk " << chunk_id << "] 64KB" << std::endl;
+        ++chunk_id;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
     ringbuf_shutdown(ring);
@@ -138,12 +140,13 @@ int consume_downstream() {
     RingBuffer* ring = ringbuf_create(kDownstreamBufName);
     std::cout << "sidecar: created " << kDownstreamBufName << std::endl;
 
+    std::vector<std::int32_t> chunk(4096, 0); // 16KB chunk
     while (running != 0) {
-        std::int32_t value = 0;
-        if (!read_exact(ring, &value, sizeof(value))) {
+        if (!read_exact(ring, chunk.data(), chunk.size() * sizeof(std::int32_t))) {
             break;
         }
-        std::cout << "downstream -> " << value << std::endl;
+        std::cout << "downstream -> [Chunk " << chunk[0] << "] 16KB consumed" << std::endl;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20)); // intentional slow down
     }
 
     ringbuf_shutdown(ring);

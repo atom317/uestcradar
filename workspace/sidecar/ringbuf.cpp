@@ -15,8 +15,6 @@
 
 namespace {
 
-constexpr std::uint32_t kRingReady = 0x52494E47;
-
 [[noreturn]] void throw_system_error(const char* operation) {
     throw std::system_error(errno, std::generic_category(), operation);
 }
@@ -61,7 +59,7 @@ RingBuffer* ringbuf_create(const char* name) {
     ::close(fd);
 
     new (ring) RingBuffer();
-    ring->ready.store(kRingReady, std::memory_order_release);
+    ring->header.magic.store(kRingMagic, std::memory_order_release);
     return ring;
 }
 
@@ -91,8 +89,15 @@ RingBuffer* ringbuf_open(const char* name) {
 
         RingBuffer* ring = map_ring(fd);
         ::close(fd);
-        while (ring->ready.load(std::memory_order_acquire) != kRingReady) {
+        while (ring->header.magic.load(std::memory_order_acquire) != kRingMagic) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (ring->header.abi_version != kRingAbiVersion ||
+            ring->header.header_size != kRingHeaderSize ||
+            ring->header.capacity_bytes != kRingCapacity) {
+            ringbuf_close(ring);
+            errno = EPROTO;
+            throw_system_error("ringbuf ABI");
         }
         return ring;
     }
@@ -111,9 +116,9 @@ std::int32_t ringbuf_write(
     }
 
     const std::uint64_t write =
-        ring->write_position.load(std::memory_order_relaxed);
+        ring->header.write_position.load(std::memory_order_relaxed);
     const std::uint64_t read =
-        ring->read_position.load(std::memory_order_acquire);
+        ring->header.read_position.load(std::memory_order_acquire);
     const std::size_t free_space = kRingCapacity - (write - read);
     const std::size_t write_size = std::min(len, free_space);
     if (write_size == 0) {
@@ -129,7 +134,7 @@ std::int32_t ringbuf_write(
         static_cast<const std::byte*>(data) + first_size,
         write_size - first_size);
 
-    ring->write_position.store(write + write_size, std::memory_order_release);
+    ring->header.write_position.store(write + write_size, std::memory_order_release);
     return static_cast<std::int32_t>(write_size);
 }
 
@@ -146,9 +151,9 @@ std::int32_t ringbuf_read(
     }
 
     const std::uint64_t read =
-        ring->read_position.load(std::memory_order_relaxed);
+        ring->header.read_position.load(std::memory_order_relaxed);
     const std::uint64_t write =
-        ring->write_position.load(std::memory_order_acquire);
+        ring->header.write_position.load(std::memory_order_acquire);
     const std::size_t available = write - read;
     const std::size_t read_size = std::min(len, available);
     if (read_size == 0) {
@@ -164,18 +169,18 @@ std::int32_t ringbuf_read(
         ring->data,
         read_size - first_size);
 
-    ring->read_position.store(read + read_size, std::memory_order_release);
+    ring->header.read_position.store(read + read_size, std::memory_order_release);
     return static_cast<std::int32_t>(read_size);
 }
 
 bool ringbuf_is_shutdown(const RingBuffer* ring) noexcept {
     return ring != nullptr &&
-           ring->shutdown.load(std::memory_order_acquire) != 0;
+           ring->header.shutdown.load(std::memory_order_acquire) != 0;
 }
 
 void ringbuf_shutdown(RingBuffer* ring) noexcept {
     if (ring != nullptr) {
-        ring->shutdown.store(1, std::memory_order_release);
+        ring->header.shutdown.store(1, std::memory_order_release);
     }
 }
 

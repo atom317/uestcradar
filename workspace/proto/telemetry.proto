@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package cycomm.telemetry.v1;
+
+option go_package = "uestcradar/telemetry/internal/telemetrypb";
+option optimize_for = LITE_RUNTIME;
+
+message RingBufferMetric {
+  string node_id = 1;
+  string link_id = 2;
+  uint64 sequence = 3;
+  uint64 observed_unix_ns = 4;
+  uint64 capacity_bytes = 5;
+  uint64 used_bytes = 6;
+  uint64 write_position = 7;
+  uint64 read_position = 8;
+  bool shutdown = 9;
+}
+
+message TelemetryPacket {
+  repeated RingBufferMetric rings = 1;
+}

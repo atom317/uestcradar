@@ -2,6 +2,7 @@
 !docker/
 !docker/Dockerfile.sidecar
 !docker/Dockerfile.worker
+!docker/sidecar-entrypoint.sh
 !workspace/
 !workspace/CMakeLists.txt
 !workspace/worker.cpp
@@ -11,3 +12,9 @@
 !workspace/sidecar/ringbuf.hpp
 !workspace/sidecar/ringbuf.cpp
 !workspace/sidecar/main.cpp
+!workspace/sidecar/telemetry.hpp
+!workspace/sidecar/telemetry.cpp
+!workspace/proto/
+!workspace/proto/telemetry.proto
+!workspace/web/
+!workspace/web/**

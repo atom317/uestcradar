@@ -1,4 +1,5 @@
 #include "ringbuf.hpp"
+#include "telemetry.hpp"
 
 #include <chrono>
 #include <csignal>
@@ -99,7 +100,9 @@ int consume_downstream() {
 
 int main(int argc, char* argv[]) {
     if (argc != 2) {
-        std::cerr << "usage: sidecar produce-upstream|consume-downstream\n";
+        std::cerr
+            << "usage: sidecar produce-upstream|consume-downstream|"
+               "export-telemetry\n";
         return 2;
     }
 
@@ -112,6 +115,9 @@ int main(int argc, char* argv[]) {
         }
         if (mode == "consume-downstream") {
             return consume_downstream();
+        }
+        if (mode == "export-telemetry") {
+            return run_telemetry_exporter(running);
         }
         std::cerr << "unknown mode: " << mode << '\n';
         return 2;

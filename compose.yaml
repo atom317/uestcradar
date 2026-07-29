@@ -10,6 +10,11 @@ services:
     ipc: shareable
     shm_size: 64m
     init: true
+    environment:
+      NODE_ID: ${NODE_ID:-local}
+      TELEMETRY_HOST: ${TELEMETRY_HOST:-telemetry-web}
+      TELEMETRY_PORT: ${TELEMETRY_PORT:-9900}
+      SAMPLE_INTERVAL: ${SAMPLE_INTERVAL:-100}
 
   worker:
     container_name: ring-worker
@@ -23,3 +28,20 @@ services:
     depends_on:
       - sidecar
     init: true
+
+  telemetry-web:
+    container_name: telemetry-web
+    build:
+      context: .
+      dockerfile: workspace/web/Dockerfile
+    image: ${TELEMETRY_IMAGE:-uestcradar-telemetry:0.1.0}
+    ports:
+      - "8080:8080"
+      - "9900:9900/udp"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    cpus: 0.50

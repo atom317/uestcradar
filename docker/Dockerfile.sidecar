@@ -7,19 +7,31 @@ FROM ${BASE_IMAGE} AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 RUN unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy \
     && apt-get update \
-    && apt-get install -y --no-install-recommends g++ \
+    && apt-get install -y --no-install-recommends \
+       g++ libprotobuf-dev pkg-config protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
-COPY workspace/sidecar/ ./
-RUN mkdir -p /out \
+COPY workspace/sidecar/ ./sidecar/
+COPY workspace/proto/telemetry.proto ./proto/telemetry.proto
+RUN mkdir -p /out /src/generated \
+    && protoc \
+       -I /src/proto \
+       --cpp_out=/src/generated \
+       /src/proto/telemetry.proto \
+    && protobuf_lite_archive="$(pkg-config --variable=libdir protobuf-lite)/libprotobuf-lite.a" \
     && g++ -std=c++20 -O2 -Wall -Wextra -Wpedantic \
        -static-libgcc -static-libstdc++ \
-       ringbuf.cpp main.cpp -o /out/sidecar
+       -I/src/generated -I/src/sidecar \
+       sidecar/ringbuf.cpp sidecar/telemetry.cpp sidecar/main.cpp \
+       generated/telemetry.pb.cc \
+       "${protobuf_lite_archive}" -pthread \
+       -o /out/sidecar
 
 FROM ${BASE_IMAGE} AS runtime
 
 WORKDIR /app
 COPY --from=builder /out/sidecar /app/sidecar
+COPY --chmod=755 docker/sidecar-entrypoint.sh /app/sidecar-entrypoint.sh
 
-CMD ["/bin/bash", "-c", "trap 'kill -TERM \"$producer\" \"$consumer\" 2>/dev/null; wait' TERM INT EXIT; /app/sidecar produce-upstream & producer=$!; /app/sidecar consume-downstream & consumer=$!; wait -n \"$producer\" \"$consumer\""]
+ENTRYPOINT ["/app/sidecar-entrypoint.sh"]

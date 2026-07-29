@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>RingBuffer Telemetry</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #0b1020; color: #e5e7eb; }
+    header { padding: 20px 24px; border-bottom: 1px solid #243047; }
+    h1 { margin: 0; font-size: 20px; }
+    #status { color: #94a3b8; margin-top: 6px; font-size: 13px; }
+    main { display: grid; gap: 16px; padding: 20px; grid-template-columns: repeat(auto-fit,minmax(420px,1fr)); }
+    article { background: #111a2e; border: 1px solid #26344f; border-radius: 10px; padding: 16px; }
+    h2 { margin: 0 0 12px; font-size: 16px; }
+    dl { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin: 0 0 14px; }
+    dt { color: #94a3b8; font-size: 11px; }
+    dd { margin: 3px 0 0; font: 14px ui-monospace,monospace; }
+    canvas { width: 100%; height: 150px; background: #0a1224; border-radius: 6px; }
+    .down { color: #fb7185; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Shared Memory RingBuffer</h1>
+    <div id="status">等待 Telemetry…</div>
+  </header>
+  <main id="cards"></main>
+  <script>
+    const cards = document.querySelector("#cards");
+    const status = document.querySelector("#status");
+
+    function bytes(value) {
+      const units = ["B", "KiB", "MiB", "GiB"];
+      let index = 0;
+      while (value >= 1024 && index < units.length - 1) {
+        value /= 1024;
+        index++;
+      }
+      return `${value.toFixed(index ? 1 : 0)} ${units[index]}`;
+    }
+
+    function escapeHTML(value) {
+      return String(value).replace(/[&<>"']/g, character => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;",
+        '"': "&quot;", "'": "&#39;"
+      })[character]);
+    }
+
+    function draw(canvas, points) {
+      const ratio = devicePixelRatio || 1;
+      const width = canvas.clientWidth;
+      const height = canvas.clientHeight;
+      canvas.width = width * ratio;
+      canvas.height = height * ratio;
+      const context = canvas.getContext("2d");
+      context.scale(ratio, ratio);
+      context.strokeStyle = "#26344f";
+      context.beginPath();
+      for (let row = 1; row < 4; row++) {
+        context.moveTo(0, height * row / 4);
+        context.lineTo(width, height * row / 4);
+      }
+      context.stroke();
+      if (points.length < 2) return;
+      context.strokeStyle = "#38bdf8";
+      context.lineWidth = 2;
+      context.beginPath();
+      points.forEach((point, index) => {
+        const x = width * index / (points.length - 1);
+        const usage = point.capacity_bytes ? point.used_bytes / point.capacity_bytes : 0;
+        const y = height - Math.min(1, usage) * height;
+        index ? context.lineTo(x, y) : context.moveTo(x, y);
+      });
+      context.stroke();
+    }
+
+    function render(series) {
+      cards.replaceChildren();
+      for (const item of series) {
+        const latest = item.points[item.points.length - 1];
+        if (!latest) continue;
+        const usage = latest.capacity_bytes
+          ? latest.used_bytes / latest.capacity_bytes * 100
+          : 0;
+        const article = document.createElement("article");
+        article.innerHTML = `
+          <h2>${escapeHTML(item.node_id)} / ${escapeHTML(item.link_id)}
+            ${latest.shutdown ? '<span class="down">● shutdown</span>' : ""}
+          </h2>
+          <dl>
+            <div><dt>容量</dt><dd>${bytes(latest.capacity_bytes)}</dd></div>
+            <div><dt>已用</dt><dd>${bytes(latest.used_bytes)}</dd></div>
+            <div><dt>使用率</dt><dd>${usage.toFixed(2)}%</dd></div>
+            <div><dt>写位置</dt><dd>${latest.write_position}</dd></div>
+            <div><dt>读位置</dt><dd>${latest.read_position}</dd></div>
+            <div><dt>序号</dt><dd>${latest.sequence}</dd></div>
+          </dl>
+          <canvas></canvas>`;
+        cards.append(article);
+        draw(article.querySelector("canvas"), item.points);
+      }
+    }
+
+    async function refresh() {
+      try {
+        const response = await fetch("/api/metrics", {cache: "no-store"});
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        render(data);
+        status.textContent = `100 ms 刷新 · ${data.length} 条链路 · ${new Date().toLocaleTimeString()}`;
+      } catch (error) {
+        status.textContent = `Web 数据暂不可用：${error.message}`;
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 100);
+  </script>
+</body>
+</html>

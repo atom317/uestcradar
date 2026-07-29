@@ -1,69 +1,95 @@
-# Sidecar 极简网络通信模块架构设计 (Network Component)
+# UCX Network 模块
 
-> 架构设计原则：**奥卡姆剃刀原理（Occam's Razor: 如无必要，勿增实体）**
->
-> 模块定位：**只专注于提供最基础、最直接的物理 RDMA/UCX 通信，绝不引入冗余包装与中间层。**
+本目录是可独立构建的点对点 UCX/UCP 字节传输模块。当前里程碑只提供
+`UCXTransport`、功能测试和双容器 benchmark；尚未接入 Sidecar 的
+`main.cpp`、RingBuffer、Forwarder 或 Telemetry。
 
----
+## 边界
 
-## 1. 模块设计思想与物理职责
+- `UCXTransport::accept_one()` 接受一个连接，`connect()` 连接一个对端。
+- `send()` / `receive()` 使用 UCP tag 非阻塞接口，返回 move-only
+  `UCXRequest`；调用者必须保持 buffer 有效，直到 `wait()` 完成。
+- 每个实例使用 `UCS_THREAD_MODE_SINGLE`，同一个 transport 只能由一个线程驱动。
+- Payload 是裸字节，模块不做序列化、分帧、路由、重试或业务解析。
+- tag `UINT64_MAX` 和 `UINT64_MAX - 1` 保留给内部建连握手，调用方不要使用。
+- 当前实现不承诺应用 buffer 的零拷贝；是否走 RDMA、TCP 或共享内存由 UCX
+  运行时选择。
 
-本 `network` 模块是 `cycomm-sidecar-agent` 跨机数据搬运的物理引擎。它仅承担一个物理职责：
+## 独立构建与测试
 
-$$ \text{本机 Shared Memory (/upstreambuf)} \xrightarrow{\text{网络传输通道 (network)}} \text{远端 Sidecar (/downstreambuf)} $$
+依赖 CMake、C++20、pkg-config 和 UCX 开发包：
 
-### ❌ 剃刀法则：明确排除（Non-Goals）
-为了保持极简与确定性的低延迟性能，本模块**绝对不承担**以下职责：
-* **不实现** 复杂的应用层 RPC 框架；
-* **不实现** 动态服务发现、路由表与 DAG 拓扑编排；
-* **不实现** 冗余的多层抽象接口与继承树；
-* **不实现** 业务 Payload 序列化与反序列化（仅做 Raw Binary 无损搬运）。
-
----
-
-## 2. 最基础 UCX (UCP) 底层 API 映射关系
-
-本模块纯粹基于开源 **UCX (Unified Communication X)** 的最基础原生 C API 实现，直接映射 4 大底层原语：
-
-```text
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ [初始化与建链]                                                               │
-│ 1. ucp_init()       : 初始化 UCX 物理上下文与硬件资源 (IB/RoCE/TCP)        │
-│ 2. ucp_ep_create()  : 根据目标机器地址 (IP:Port) 创建点对点通信 Endpoint      │
-├──────────────────────────────────────────────────────────────────────────────┤
-│ [极速数据收发 (Zero-Copy Tagged I/O)]                                        │
-│ 3. ucp_tag_send_nbx(): 非阻塞极速 Tag 发送 Payload (可以直接从 Shm 缓冲区发)  │
-│ 4. ucp_tag_recv_nbx(): 非阻塞极速 Tag 接收 Payload (直接落盘入本机的 Shm)    │
-└──────────────────────────────────────────────────────────────────────────────┘
+```bash
+cmake -S workspace/sidecar/network \
+      -B build/sidecar-network \
+      -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_TESTING=ON
+cmake --build build/sidecar-network --parallel
+ctest --test-dir build/sidecar-network --output-on-failure
 ```
 
----
+产物：
 
-## 3. 极简网络桥接流程 (Network Data Path)
+- `libcycomm_network.a`
+- `ucx-transport-test`
+- `ucx-network-benchmark`
 
-```text
-             [本机 Shm /upstreambuf]
-                        │
-                        ▼  (1) 读取待发送数据帧 (Zero-Copy Read)
-             ┌─────────────────────┐
-             │ network::rdma_send  │  (2) 调用 ucp_tag_send_nbx() 原生接口
-             └──────────┬──────────┘
-                        │  RDMA (RoCE / IB / TCP 回退)
-                        ▼
-             ┌─────────────────────┐
-             │ network::rdma_recv  │  (3) 调用 ucp_tag_recv_nbx() 原生接口
-             └──────────┬──────────┘
-                        │
-                        ▼  (4) 直接落盘写入 (Zero-Copy Write)
-            [远端 Shm /downstreambuf]
+## TCP 双容器基线
+
+默认镜像是项目 ARM64 基础镜像。在非 ARM64 开发机上可用
+`BASE_IMAGE=ubuntu:24.04` 做功能验证，但其性能数字不能作为 ARM64 目标机结论。
+
+```bash
+cd workspace/sidecar/network
+BASE_IMAGE=ubuntu:24.04 \
+UCX_BENCHMARK_IMAGE=uestcradar-ucx-benchmark:dev \
+docker compose -f compose.benchmark.yaml \
+  up --build --abort-on-container-exit --exit-code-from client
+docker compose -f compose.benchmark.yaml down
 ```
 
----
+benchmark 对 4 KiB、64 KiB、512 KiB 依次执行：
 
-## 4. 后续物理文件划分规范
+1. 数据完整性校验；
+2. 16 次不计时预热；
+3. window=64 的单向 streaming；
+4. ping-pong RTT。
 
-当启动代码实现时，`network` 目录下仅保留以下纯粹的实现文件：
+Client 输出 streaming 的 GiB/s、OPS，以及 RTT mean/p50/p99。`--quick`
+只用于快速回归；去掉 compose 中两处 `--quick` 才是完整基线。
 
-* 📄 `network/rdma_transport.hpp`：定义原生 UCX Context / Endpoint 句柄与极简接口；
-* 📄 `network/rdma_transport.cpp`：仅包含 4 大原生 UCX C API 的物理驱动调用；
-* 📄 `network/README.md`：本架构设计说明文档。
+## 原生 ARM64 / RDMA profile
+
+只有目标机具备可用 RDMA 设备、驱动及 UCX transport 时，才使用覆盖文件。
+两台机器分别只启动自己的 service，并把 Client 的 `PEER_HOST` 指向 Server：
+
+```bash
+# Server
+docker compose -f compose.benchmark.yaml -f compose.rdma.yaml \
+  up --build server
+
+# Client（另一台机器）
+PEER_HOST=<server-ip> \
+docker compose -f compose.benchmark.yaml -f compose.rdma.yaml \
+  run --rm client
+```
+
+RDMA profile 使用 host network、host IPC、`/dev/infiniband`、unlimited
+memlock，并默认设置 `UCX_TLS=rc,tcp,self`。可先用 `ucx_info -d` 核对实际
+设备和 transport；结果报告必须注明 CPU、网卡、链路、UCX 版本和
+`UCX_TLS`。
+
+## 文件
+
+```text
+network/
+├── CMakeLists.txt
+├── README.md
+├── ucx_transport.hpp
+├── ucx_transport.cpp
+├── transport_test.cpp
+├── benchmark.cpp
+├── compose.benchmark.yaml
+└── compose.rdma.yaml
+```

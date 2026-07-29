@@ -1,0 +1,40 @@
+services:
+  server:
+    network_mode: host
+    ipc: host
+    command:
+      - --server
+      - --bind
+      - ${BIND_HOST:-0.0.0.0}
+      - --port
+      - ${UCX_PORT:-13337}
+    environment:
+      UCX_TLS: ${UCX_TLS:-rc,tcp,self}
+    devices:
+      - /dev/infiniband:/dev/infiniband
+    cap_add:
+      - IPC_LOCK
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+
+  client:
+    network_mode: host
+    ipc: host
+    command:
+      - --client
+      - --host
+      - ${PEER_HOST:-127.0.0.1}
+      - --port
+      - ${UCX_PORT:-13337}
+    environment:
+      UCX_TLS: ${UCX_TLS:-rc,tcp,self}
+    devices:
+      - /dev/infiniband:/dev/infiniband
+    cap_add:
+      - IPC_LOCK
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1

@@ -1,5 +1,5 @@
 #include "ringbuf/ringbuf.hpp"
-#include "telemetry.hpp"
+#include "telemetry/telemetry.hpp"
 
 #include <chrono>
 #include <csignal>

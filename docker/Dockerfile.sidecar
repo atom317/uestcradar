@@ -23,10 +23,42 @@ RUN mkdir -p /out /src/generated \
     && g++ -std=c++20 -O2 -Wall -Wextra -Wpedantic \
        -static-libgcc -static-libstdc++ \
        -I/src/generated -I/src/sidecar \
-       sidecar/ringbuf/ringbuf.cpp sidecar/telemetry.cpp sidecar/main.cpp \
+       sidecar/ringbuf/ringbuf.cpp sidecar/telemetry/telemetry.cpp sidecar/main.cpp \
        generated/telemetry.pb.cc \
        "${protobuf_lite_archive}" -pthread \
        -o /out/sidecar
+
+FROM ${BASE_IMAGE} AS network-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+       cmake g++ libucx-dev ninja-build pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src/network
+COPY workspace/sidecar/network/ ./
+RUN cmake -S . -B build -G Ninja \
+       -DCMAKE_BUILD_TYPE=Release \
+       -DBUILD_TESTING=ON \
+    && cmake --build build --parallel \
+    && ctest --test-dir build --output-on-failure
+
+FROM ${BASE_IMAGE} AS network-benchmark
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends libucx0 ucx-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=network-builder \
+    /src/network/build/ucx-network-benchmark \
+    /app/ucx-network-benchmark
+
+ENTRYPOINT ["/app/ucx-network-benchmark"]
 
 FROM ${BASE_IMAGE} AS runtime
 

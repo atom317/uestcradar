@@ -7,6 +7,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src/web
+ENV GOPROXY=https://goproxy.cn,direct
 COPY workspace/web/go.mod workspace/web/go.sum ./
 RUN go mod download \
     && go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.6

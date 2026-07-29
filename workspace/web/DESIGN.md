@@ -29,7 +29,7 @@
 
 ## RingBuffer ABI
 
-RingBuffer 前4096字节是固定头部：
+RingBuffer 是无锁的单生产者/单消费者（SPSC）队列。RingBuffer 前4096字节是固定头部：
 
 - `magic`、`abi_version`、`header_size`
 - `capacity_bytes`
@@ -47,6 +47,9 @@ write_position - read_position <= capacity_bytes
 ```
 
 不一致的快照直接丢弃。
+
+生产者只写 `write_position`，消费者只写 `read_position`；当队列满时写入返回 0，
+由主链路重试，不覆盖未消费的数据。两条位置字段分别独占一个缓存行。
 
 ## Telemetry 数据流
 

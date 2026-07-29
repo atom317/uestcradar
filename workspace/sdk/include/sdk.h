@@ -19,6 +19,11 @@ extern "C" {
 
 CYCOMM_SDK_API int32_t io_open(void);
 CYCOMM_SDK_API int32_t io_read(void* data, size_t len);
+/*
+ * Writes are non-blocking with respect to ring capacity. When the downstream
+ * ring is full, its oldest unread bytes are discarded so the newest data is
+ * retained.
+ */
 CYCOMM_SDK_API int32_t io_write(const void* data, size_t len);
 CYCOMM_SDK_API void io_close(void);
 

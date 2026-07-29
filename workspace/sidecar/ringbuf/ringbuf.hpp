@@ -7,10 +7,13 @@
 inline constexpr char kUpstreamBufName[] = "/uestcradar_upstream";
 inline constexpr char kDownstreamBufName[] = "/uestcradar_downstream";
 inline constexpr std::uint32_t kRingMagic = 0x52494E47;
-inline constexpr std::uint16_t kRingAbiVersion = 1;
+inline constexpr std::uint16_t kRingAbiVersion = 3;
 inline constexpr std::size_t kRingHeaderSize = 4096;
 inline constexpr std::size_t kRingCapacity = 1024 * 1024;
 
+// This shared-memory ring is single-producer/single-consumer.  The producer
+// exclusively updates write_position and the consumer exclusively updates
+// read_position, so no mutex or compare-exchange loop is required.
 struct alignas(kRingHeaderSize) RingBufferHeader {
     std::atomic<std::uint32_t> magic{0};
     std::uint16_t abi_version{kRingAbiVersion};

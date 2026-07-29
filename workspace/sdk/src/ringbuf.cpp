@@ -119,20 +119,22 @@ std::int32_t ringbuf_write(
         ring->header.write_position.load(std::memory_order_relaxed);
     const std::uint64_t read =
         ring->header.read_position.load(std::memory_order_acquire);
-    const std::size_t free_space = kRingCapacity - (write - read);
-    const std::size_t write_size = std::min(len, free_space);
+    if (write < read || write - read > kRingCapacity) {
+        return -1;
+    }
+
+    const std::size_t available =
+        kRingCapacity - static_cast<std::size_t>(write - read);
+    const std::size_t write_size = std::min(len, available);
     if (write_size == 0) {
         return 0;
     }
 
+    const auto* source = static_cast<const std::byte*>(data);
     const std::size_t position = write % kRingCapacity;
-    const std::size_t first_size =
-        std::min(write_size, kRingCapacity - position);
-    std::memcpy(ring->data + position, data, first_size);
-    std::memcpy(
-        ring->data,
-        static_cast<const std::byte*>(data) + first_size,
-        write_size - first_size);
+    const std::size_t first_size = std::min(write_size, kRingCapacity - position);
+    std::memcpy(ring->data + position, source, first_size);
+    std::memcpy(ring->data, source + first_size, write_size - first_size);
 
     ring->header.write_position.store(write + write_size, std::memory_order_release);
     return static_cast<std::int32_t>(write_size);
@@ -154,15 +156,17 @@ std::int32_t ringbuf_read(
         ring->header.read_position.load(std::memory_order_relaxed);
     const std::uint64_t write =
         ring->header.write_position.load(std::memory_order_acquire);
-    const std::size_t available = write - read;
-    const std::size_t read_size = std::min(len, available);
+    if (write < read || write - read > kRingCapacity) {
+        return -1;
+    }
+    const std::size_t read_size =
+        std::min(len, static_cast<std::size_t>(write - read));
     if (read_size == 0) {
         return 0;
     }
 
     const std::size_t position = read % kRingCapacity;
-    const std::size_t first_size =
-        std::min(read_size, kRingCapacity - position);
+    const std::size_t first_size = std::min(read_size, kRingCapacity - position);
     std::memcpy(data, ring->data + position, first_size);
     std::memcpy(
         static_cast<std::byte*>(data) + first_size,

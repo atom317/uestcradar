@@ -1,6 +1,6 @@
 #include "telemetry.hpp"
 
-#include "ringbuf.hpp"
+#include "ringbuf/ringbuf.hpp"
 #include "telemetry.pb.h"
 
 #include <array>

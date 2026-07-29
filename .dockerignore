@@ -9,8 +9,9 @@
 !workspace/sdk/
 !workspace/sdk/**
 !workspace/sidecar/
-!workspace/sidecar/ringbuf.hpp
-!workspace/sidecar/ringbuf.cpp
+!workspace/sidecar/ringbuf/
+!workspace/sidecar/ringbuf/ringbuf.hpp
+!workspace/sidecar/ringbuf/ringbuf.cpp
 !workspace/sidecar/main.cpp
 !workspace/sidecar/telemetry.hpp
 !workspace/sidecar/telemetry.cpp

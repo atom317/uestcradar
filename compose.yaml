@@ -7,4 +7,4 @@ services:
       dockerfile: docker/Dockerfile
       args:
         BASE_IMAGE: registry.chengyistudio.com/cxx/ubuntu:24.04
-    image: registry.chengyistudio.com/cxx/helloworld:0.2.0
+    image: ${HELLOWORLD_IMAGE:-registry.chengyistudio.com/cxx/helloworld:0.2.0}

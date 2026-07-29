@@ -13,7 +13,9 @@ struct Complex32 {
 // spectrum.  Construction is the only allocation/planning point.
 class FftwBatchBackend {
 public:
-    FftwBatchBackend(std::size_t samples_per_pulse, std::size_t batch_count,
+    FftwBatchBackend(std::size_t samples_per_pulse,
+                     std::size_t impulse_length,
+                     std::size_t batch_count,
                      std::size_t fftw_thread_count);
     ~FftwBatchBackend();
 

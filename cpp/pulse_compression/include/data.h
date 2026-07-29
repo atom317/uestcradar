@@ -3,14 +3,32 @@
 #include <common/data_types.h>
 
 #include <cstddef>
+#include <cstdint>
+#include <type_traits>
+#include <vector>
 
 namespace cycore::algorithm::pulse_compression {
 
-using InputSample = cy::common::CS16;
-using OutputSample = cy::common::CS16;
+inline constexpr std::uint32_t kDefaultPoints = 1024;
+inline constexpr std::uint32_t kReplicaPoints = 256;
 
-constexpr std::size_t kDefaultNumChannels = 16;
-constexpr std::size_t kDefaultNumPulses = 64;
-constexpr std::size_t kDefaultSamplesPerPulse = 4096;
+struct PulseCompressionHeader {
+    std::uint32_t points = 0;
+};
+
+struct InputData {
+    PulseCompressionHeader header{};
+    std::vector<cy::common::CS16> payload;
+};
+
+struct OutputData {
+    PulseCompressionHeader header{};
+    std::vector<cy::common::CS16> payload;
+};
+
+static_assert(std::is_trivially_copyable_v<PulseCompressionHeader>,
+              "PulseCompressionHeader must be trivially copyable");
+static_assert(std::is_trivially_copyable_v<cy::common::CS16>,
+              "Pulse-compression samples must be trivially copyable");
 
 } // namespace cycore::algorithm::pulse_compression

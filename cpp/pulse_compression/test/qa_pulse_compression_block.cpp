@@ -1,320 +1,388 @@
 #include "pulse_compression_algorithm.h"
 
-#include <block_test_harness.h>
 #include <cycore_algorithm_sdk.h>
-#include <flowgraph/block_wrapper.h>
-#include <flowgraph/value.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <exception>
+#include <cstring>
 #include <iostream>
-#include <memory>
 #include <stdexcept>
 #include <string>
-#include <type_traits>
-#include <utility>
 #include <vector>
 
+namespace data = cycore::algorithm::pulse_compression;
 namespace fg = cy::flowgraph;
 namespace sdk = cycore::sdk;
-namespace test_support = cycore::sdk::test;
-namespace data = cycore::algorithm::pulse_compression;
 
 namespace {
 
-using InputSample = data::InputSample;
-using OutputSample = data::OutputSample;
-using ProductionBlock =
-    sdk::AlgorithmBlockAdapter<PulseCompressionAlgorithm, InputSample, OutputSample>;
-using Harness = test_support::BlockTestHarness<InputSample, OutputSample>;
+constexpr double kPi = 3.14159265358979323846;
+constexpr double kSampleRate = 30.72e6;
+constexpr double kBandwidth = 20.0e6;
+constexpr double kPulseDuration =
+    static_cast<double>(data::kReplicaPoints) / kSampleRate;
+constexpr double kStartFrequency = -10.0e6;
+constexpr std::size_t kPoints = data::kDefaultPoints;
+constexpr std::size_t kReplicaPoints = data::kReplicaPoints;
+constexpr std::size_t kMaximumInputWireBytes =
+    sdk::kFrameEnvelopeBytes +
+    sizeof(data::PulseCompressionHeader) +
+    kPoints * sizeof(cy::common::CS16);
+constexpr std::size_t kMaximumOutputWireBytes =
+    kMaximumInputWireBytes;
 
-constexpr std::size_t kReplicaLength = 256;
-
-struct Dimensions {
-    std::size_t channels;
-    std::size_t pulses;
-    std::size_t samples;
-    std::size_t elements() const { return channels * pulses * samples; }
+struct ComplexReference {
+    double i;
+    double q;
 };
 
 void Require(bool condition, const std::string& message) {
-    if (!condition) throw std::runtime_error(message);
+    if (!condition) {
+        throw std::runtime_error(message);
+    }
 }
 
-fg::ValueMap MakeParams(const Dimensions& dimensions) {
-    fg::ValueMap params;
-    params["num_channels"] = static_cast<std::int64_t>(dimensions.channels);
-    params["num_pulses"] = static_cast<std::int64_t>(dimensions.pulses);
-    params["samples_per_pulse"] = static_cast<std::int64_t>(dimensions.samples);
-    return params;
+fg::ValueMap MakeParams() {
+    return {
+        {"points", static_cast<std::int64_t>(kPoints)},
+        {"replica_points",
+         static_cast<std::int64_t>(kReplicaPoints)},
+        {"samp_rate", kSampleRate},
+        {"bandwidth", kBandwidth},
+        {"pulse_duration", kPulseDuration},
+        {"start_frequency", kStartFrequency},
+        {"max_input_frame_bytes",
+         static_cast<std::int64_t>(kMaximumInputWireBytes)},
+        {"max_output_frame_bytes",
+         static_cast<std::int64_t>(kMaximumOutputWireBytes)},
+    };
 }
-
-std::unique_ptr<fg::BlockModel> MakeBlock(const Dimensions& dimensions) {
-    return std::unique_ptr<fg::BlockModel>(
-        new fg::BlockWrapper<ProductionBlock>(
-            "pulse_compression_test", fg::BlockTypeName{"algorithm.pulse_compression"},
-            MakeParams(dimensions)));
-}
-
-std::size_t Index(const Dimensions& dimensions,
-                  std::size_t channel,
-                  std::size_t pulse,
-                  std::size_t sample) {
-    return ((pulse * dimensions.samples + sample) * dimensions.channels) + channel;
-}
-
-struct ComplexReference { double re; double im; };
 
 std::vector<ComplexReference> MakeReplica() {
-    constexpr double kSampleRate = 30.72e6;
-    constexpr double kPulseWidth = 256.0 / kSampleRate;
-    constexpr double kBandwidth = 20e6;
-    constexpr double kSlope = kBandwidth / kPulseWidth;
-    constexpr double kStartFrequency = -10e6;
-    constexpr double kPi = 3.14159265358979323846;
-    std::vector<ComplexReference> replica(kReplicaLength);
-    for (std::size_t i = 0; i < replica.size(); ++i) {
-        const double t = static_cast<double>(i) / kSampleRate;
-        const double phase = 2.0 * kPi * kStartFrequency * t + kPi * kSlope * t * t;
-        replica[i] = {std::cos(phase), std::sin(phase)};
+    std::vector<ComplexReference> replica(kReplicaPoints);
+    const double chirp_slope = kBandwidth / kPulseDuration;
+    for (std::size_t sample = 0; sample < replica.size(); ++sample) {
+        const double time = static_cast<double>(sample) / kSampleRate;
+        const double phase =
+            2.0 * kPi * kStartFrequency * time +
+            kPi * chirp_slope * time * time;
+        replica[sample] = {std::cos(phase), std::sin(phase)};
     }
     return replica;
 }
 
 std::int16_t ClampS16(double value) {
-    if (value >= 32767.0) return 32767;
-    if (value <= -32768.0) return -32768;
+    if (value >= 32767.0) {
+        return 32767;
+    }
+    if (value <= -32768.0) {
+        return -32768;
+    }
     return static_cast<std::int16_t>(std::round(value));
 }
 
-std::vector<InputSample> MakeDelayedEchoes(const Dimensions& dimensions,
-                                           const std::vector<std::size_t>& delays,
-                                           std::int16_t amplitude) {
-    Require(delays.size() == dimensions.channels, "one delay per channel is required");
+data::InputData MakeDelayedEcho(std::size_t delay,
+                                std::int16_t amplitude) {
+    Require(delay + kReplicaPoints <= kPoints,
+            "test echo does not fit in the frame");
+    data::InputData input;
+    input.header.points = static_cast<std::uint32_t>(kPoints);
+    input.payload.assign(kPoints, cy::common::CS16{0, 0});
     const auto replica = MakeReplica();
-    std::vector<InputSample> input(dimensions.elements(), InputSample{0, 0});
-    for (std::size_t channel = 0; channel < dimensions.channels; ++channel) {
-        Require(delays[channel] + kReplicaLength <= dimensions.samples,
-                "echo does not fit inside the configured PRI");
-        for (std::size_t pulse = 0; pulse < dimensions.pulses; ++pulse) {
-            for (std::size_t m = 0; m < kReplicaLength; ++m) {
-                input[Index(dimensions, channel, pulse, delays[channel] + m)] = InputSample{
-                    ClampS16(static_cast<double>(amplitude) * replica[m].re),
-                    ClampS16(static_cast<double>(amplitude) * replica[m].im)};
-            }
-        }
+    for (std::size_t sample = 0; sample < replica.size(); ++sample) {
+        input.payload[delay + sample] = {
+            ClampS16(amplitude * replica[sample].i),
+            ClampS16(amplitude * replica[sample].q),
+        };
     }
     return input;
 }
 
-std::vector<OutputSample> ReferenceCompress(const Dimensions& dimensions,
-                                             const std::vector<InputSample>& input) {
+data::OutputData ReferenceCompress(const data::InputData& input) {
     const auto replica = MakeReplica();
-    std::vector<OutputSample> output(dimensions.elements());
-    for (std::size_t pulse = 0; pulse < dimensions.pulses; ++pulse) {
-        for (std::size_t sample = 0; sample < dimensions.samples; ++sample) {
-            for (std::size_t channel = 0; channel < dimensions.channels; ++channel) {
-                double sum_i = 0.0;
-                double sum_q = 0.0;
-                for (std::size_t m = 0; m < kReplicaLength && sample + m < dimensions.samples; ++m) {
-                    const auto x = input[Index(dimensions, channel, pulse, sample + m)];
-                    sum_i += static_cast<double>(x.i) * replica[m].re +
-                             static_cast<double>(x.q) * replica[m].im;
-                    sum_q += static_cast<double>(x.q) * replica[m].re -
-                             static_cast<double>(x.i) * replica[m].im;
-                }
-                output[Index(dimensions, channel, pulse, sample)] = OutputSample{
-                    ClampS16(sum_i / static_cast<double>(kReplicaLength)),
-                    ClampS16(sum_q / static_cast<double>(kReplicaLength))};
-            }
+    data::OutputData output;
+    output.header.points = input.header.points;
+    output.payload.resize(kPoints);
+    for (std::size_t range = 0; range < kPoints; ++range) {
+        double sum_i = 0.0;
+        double sum_q = 0.0;
+        for (std::size_t tap = 0;
+             tap < kReplicaPoints && range + tap < kPoints;
+             ++tap) {
+            const auto value = input.payload[range + tap];
+            sum_i +=
+                static_cast<double>(value.i) * replica[tap].i +
+                static_cast<double>(value.q) * replica[tap].q;
+            sum_q +=
+                static_cast<double>(value.q) * replica[tap].i -
+                static_cast<double>(value.i) * replica[tap].q;
         }
+        output.payload[range] = {
+            ClampS16(sum_i / static_cast<double>(kReplicaPoints)),
+            ClampS16(sum_q / static_cast<double>(kReplicaPoints)),
+        };
     }
     return output;
 }
 
-std::vector<OutputSample> RunFrame(const Dimensions& dimensions,
-                                   const std::vector<InputSample>& input) {
-    Harness harness(MakeBlock(dimensions), dimensions.elements(), dimensions.elements(),
-                    dimensions.elements() * 2, dimensions.elements() * 2);
-    harness.publish(input);
-    const auto observation = harness.work_once();
-    Require(observation.succeeded && observation.consumed_input_elements == dimensions.elements() &&
-                observation.produced_output_elements == dimensions.elements(),
-            "Pulse-compression transaction count mismatch");
-    return harness.drain_one_transaction();
+data::OutputData RunDirect(const data::InputData& input) {
+    const auto params = MakeParams();
+    PulseCompressionAlgorithm algorithm{sdk::Params(params)};
+    data::OutputData output;
+    output.payload.reserve(kPoints);
+    Require(
+        algorithm.work(input, output) ==
+            sdk::ProcessResult::Produced,
+        "valid frame was not produced");
+    return output;
 }
 
-double MagnitudeSquared(const OutputSample& sample) {
-    return static_cast<double>(sample.i) * sample.i + static_cast<double>(sample.q) * sample.q;
+double MagnitudeSquared(const cy::common::CS16& value) {
+    return static_cast<double>(value.i) * value.i +
+           static_cast<double>(value.q) * value.q;
 }
 
-void TestReferenceAccuracyPeakAndPslr() {
-    const Dimensions dimensions{1, 1, 512};
-    const std::size_t delay = 71;
-    const auto input = MakeDelayedEchoes(dimensions, {delay}, 4096);
-    const auto actual = RunFrame(dimensions, input);
-    const auto expected = ReferenceCompress(dimensions, input);
-    for (std::size_t i = 0; i < actual.size(); ++i) {
-        Require(std::abs(static_cast<int>(actual[i].i) - expected[i].i) <= 1 &&
-                    std::abs(static_cast<int>(actual[i].q) - expected[i].q) <= 1,
-                "CS16 matched-filter output differs from independent reference");
-    }
-
-    std::size_t peak = 0;
-    double peak_power = -1.0;
-    double sidelobe_power = 0.0;
-    double expected_peak_power = -1.0;
-    double expected_sidelobe_power = 0.0;
-    for (std::size_t sample = 0; sample < dimensions.samples; ++sample) {
-        const double power = MagnitudeSquared(actual[Index(dimensions, 0, 0, sample)]);
-        if (power > peak_power) {
-            peak_power = power;
-            peak = sample;
-        }
-        const double expected_power = MagnitudeSquared(expected[Index(dimensions, 0, 0, sample)]);
-        expected_peak_power = std::max(expected_peak_power, expected_power);
-    }
-    Require(peak == delay, "matched-filter peak does not map to the target range bin");
-    for (std::size_t sample = 0; sample < dimensions.samples; ++sample) {
-        if (sample != peak) {
-            sidelobe_power = std::max(
-                sidelobe_power, MagnitudeSquared(actual[Index(dimensions, 0, 0, sample)]));
-            expected_sidelobe_power = std::max(
-                expected_sidelobe_power,
-                MagnitudeSquared(expected[Index(dimensions, 0, 0, sample)]));
-        }
-    }
-    const double pslr_db = 10.0 * std::log10(std::max(sidelobe_power, 1.0) / peak_power);
-    const double expected_pslr_db =
-        10.0 * std::log10(std::max(expected_sidelobe_power, 1.0) / expected_peak_power);
-    Require(std::abs(pslr_db - expected_pslr_db) < 0.01,
-            "matched-filter PSLR differs from independent reference");
+std::size_t PeakIndex(const data::OutputData& output) {
+    return static_cast<std::size_t>(
+        std::distance(
+            output.payload.begin(),
+            std::max_element(
+                output.payload.begin(),
+                output.payload.end(),
+                [](const auto& lhs, const auto& rhs) {
+                    return MagnitudeSquared(lhs) <
+                           MagnitudeSquared(rhs);
+                })));
 }
 
-void TestDelayEdgesAndChannelIsolation() {
-    const Dimensions dimensions{2, 2, 512};
-    const auto input = MakeDelayedEchoes(dimensions, {0, 256}, 3500);
-    const auto actual = RunFrame(dimensions, input);
-    const auto expected = ReferenceCompress(dimensions, input);
-    for (std::size_t i = 0; i < actual.size(); ++i) {
-        Require(std::abs(static_cast<int>(actual[i].i) - expected[i].i) <= 1 &&
-                    std::abs(static_cast<int>(actual[i].q) - expected[i].q) <= 1,
-                "multi-channel pulse-compression reference mismatch");
-    }
-    for (std::size_t pulse = 0; pulse < dimensions.pulses; ++pulse) {
-        for (std::size_t channel = 0; channel < dimensions.channels; ++channel) {
-            const std::size_t expected_delay = channel == 0 ? 0 : 256;
-            std::size_t peak = 0;
-            double peak_power = -1.0;
-            for (std::size_t sample = 0; sample < dimensions.samples; ++sample) {
-                const double power = MagnitudeSquared(actual[Index(dimensions, channel, pulse, sample)]);
-                if (power > peak_power) { peak_power = power; peak = sample; }
-            }
-            Require(peak == expected_delay, "channel/pulse matched-filter peak is not isolated");
-        }
+template <typename Frame>
+std::vector<std::byte> EncodePayload(const Frame& frame) {
+    using Codec = sdk::FrameDataCodec<Frame>;
+    std::vector<std::byte> payload(Codec::encoded_size(frame));
+    Require(
+        Codec::encode(
+            frame,
+            cy::common::Span<std::byte>(
+                payload.data(), payload.size())),
+        "failed to encode business frame");
+    return payload;
+}
+
+std::vector<std::byte> EncodeInput(
+    const data::InputData& input,
+    sdk::FrameMetadata metadata) {
+    const auto payload = EncodePayload(input);
+    std::vector<std::byte> wire(
+        sdk::WireFrameBytes(payload.size()));
+    Require(
+        sdk::EncodeFrame(
+            cy::common::Span<const std::byte>(
+                payload.data(), payload.size()),
+            metadata,
+            cy::common::Span<std::byte>(
+                wire.data(), wire.size())),
+        "failed to encode SDK frame");
+    return wire;
+}
+
+void Publish(fg::PortOut<std::byte>& source,
+             const std::byte* bytes,
+             std::size_t size) {
+    std::size_t offset = 0;
+    while (offset < size) {
+        auto span = source.reserve(size - offset);
+        Require(!span.empty(), "test source was backpressured");
+        std::memcpy(span.data(), bytes + offset, span.size());
+        offset += span.size();
+        span.commit(span.size());
     }
 }
 
-void TestReferenceAcrossFftSizes() {
-    const std::vector<std::pair<Dimensions, std::size_t>> cases{
-        {{1, 1, 256}, 0},
-        {{1, 1, 1024}, 384},
-        {{1, 1, 4096}, 3800},
-    };
-    for (const auto& test_case : cases) {
-        const auto& dimensions = test_case.first;
-        const auto input = MakeDelayedEchoes(dimensions, {test_case.second}, 3000);
-        const auto actual = RunFrame(dimensions, input);
-        const auto expected = ReferenceCompress(dimensions, input);
-        for (std::size_t i = 0; i < actual.size(); ++i) {
-            Require(std::abs(static_cast<int>(actual[i].i) - expected[i].i) <= 1 &&
-                        std::abs(static_cast<int>(actual[i].q) - expected[i].q) <= 1,
-                    "NFFT-dependent pulse-compression output differs from reference");
-        }
-        std::size_t peak = 0;
-        double peak_power = -1.0;
-        for (std::size_t sample = 0; sample < dimensions.samples; ++sample) {
-            const double power = MagnitudeSquared(actual[Index(dimensions, 0, 0, sample)]);
-            if (power > peak_power) {
-                peak_power = power;
-                peak = sample;
-            }
-        }
-        Require(peak == test_case.second, "NFFT-dependent peak position mismatch");
+std::vector<std::byte> Drain(fg::PortIn<std::byte>& sink) {
+    std::vector<std::byte> result(sink.available());
+    if (!result.empty()) {
+        Require(
+            sink.peek_copy(
+                0,
+                cy::common::Span<std::byte>(
+                    result.data(), result.size())) == result.size(),
+            "failed to peek output");
+        Require(
+            sink.consume_exact(result.size()),
+            "failed to consume output");
     }
+    return result;
 }
 
-void TestTransactionalBoundariesAndRingWrap() {
-    const Dimensions dimensions{1, 1, 512};
-    const auto frame = MakeDelayedEchoes(dimensions, {37}, 3000);
-    {
-        Harness harness(MakeBlock(dimensions), dimensions.elements(), dimensions.elements(),
-                        dimensions.elements() * 2, dimensions.elements() * 2);
-        harness.publish(frame.data(), frame.size() - 1);
-        const auto observation = harness.work_once();
-        Require(!observation.succeeded && observation.consumed_input_elements == 0 &&
-                    observation.produced_output_elements == 0,
-                "insufficient pulse-compression input must roll back");
-    }
-    {
-        Harness harness(MakeBlock(dimensions), dimensions.elements(), dimensions.elements(),
-                        dimensions.elements() * 2, dimensions.elements() * 2);
-        harness.publish(frame);
-        Require(harness.work_once().succeeded,
-                "first pulse-compression frame should fill output ring");
-        harness.publish(frame);
-        Require(harness.work_once().succeeded,
-                "second pulse-compression frame should fill output ring");
-        harness.publish(frame);
-        const auto observation = harness.work_once();
-        Require(!observation.succeeded && observation.consumed_input_elements == 0 &&
-                    observation.produced_output_elements == 0,
-                "pulse-compression output backpressure must roll back");
-    }
-    {
-        Harness harness(MakeBlock(dimensions), dimensions.elements(), dimensions.elements(),
-                        dimensions.elements() * 2, dimensions.elements() * 2);
-        for (std::size_t i = 0; i < 5; ++i) {
-            harness.publish(frame);
-            Require(harness.work_once().succeeded, "pulse-compression ring-wrap transaction failed");
-            Require(harness.drain_one_transaction().size() == dimensions.elements(),
-                    "pulse-compression ring-wrap output size mismatch");
-        }
-    }
-}
+void TestContractGate() {
+    const auto params = MakeParams();
+    PulseCompressionAlgorithm algorithm{sdk::Params(params)};
+    data::OutputData output;
+    output.payload.reserve(kPoints);
 
-void TestCurrentCs16ContractAndParameterBoundary() {
-    static_assert(std::is_same<InputSample, OutputSample>::value,
-                  "current production contract is CS16 to CS16");
-    const Dimensions dimensions{1, 1, 512};
-    fg::ValueMap invalid = MakeParams(dimensions);
-    invalid["num_channels"] = static_cast<std::int64_t>(0);
+    data::InputData empty;
+    Require(
+        algorithm.work(empty, output) ==
+            sdk::ProcessResult::Drop,
+        "empty frame was not dropped");
+
+    auto mismatch = MakeDelayedEcho(10, 1000);
+    mismatch.header.points =
+        static_cast<std::uint32_t>(kPoints - 1);
+    Require(
+        algorithm.work(mismatch, output) ==
+            sdk::ProcessResult::Drop,
+        "header/payload mismatch was not dropped");
+
+    auto short_payload = MakeDelayedEcho(10, 1000);
+    short_payload.payload.pop_back();
+    Require(
+        algorithm.work(short_payload, output) ==
+            sdk::ProcessResult::Drop,
+        "short payload was not dropped");
+
+    auto invalid_params = MakeParams();
+    invalid_params["points"] = static_cast<std::int64_t>(0);
     bool rejected = false;
     try {
-        ProductionBlock invalid_block(invalid);
-        (void)invalid_block;
+        PulseCompressionAlgorithm invalid{
+            sdk::Params(invalid_params)};
+        (void)invalid;
     } catch (const std::invalid_argument&) {
         rejected = true;
     }
-    Require(rejected, "pulse-compression must reject zero dimensions");
+    Require(rejected, "zero configured points were accepted");
+}
+
+void TestGoldenReferencePeakGainAndDelay() {
+    constexpr std::int16_t kAmplitude = 4096;
+    for (const std::size_t delay :
+         {std::size_t{0}, std::size_t{137},
+          kPoints - kReplicaPoints}) {
+        const auto input = MakeDelayedEcho(delay, kAmplitude);
+        const auto actual = RunDirect(input);
+        const auto expected = ReferenceCompress(input);
+
+        Require(actual.header.points == kPoints,
+                "output header points mismatch");
+        Require(actual.payload.size() == kPoints,
+                "output payload length mismatch");
+        for (std::size_t sample = 0; sample < kPoints; ++sample) {
+            Require(
+                std::abs(
+                    static_cast<int>(actual.payload[sample].i) -
+                    expected.payload[sample].i) <= 1 &&
+                    std::abs(
+                        static_cast<int>(
+                            actual.payload[sample].q) -
+                        expected.payload[sample].q) <= 1,
+                "FFT output differs from time-domain reference at " +
+                    std::to_string(sample));
+        }
+
+        Require(PeakIndex(actual) == delay,
+                "matched-filter peak delay mismatch");
+        const double normalized_gain =
+            std::sqrt(MagnitudeSquared(actual.payload[delay])) /
+            static_cast<double>(kAmplitude);
+        Require(
+            std::abs(normalized_gain - 1.0) < 0.01,
+            "normalized coherent peak gain mismatch");
+    }
+}
+
+void TestFrameAdapterFragmentAndMetadata() {
+    const auto input = MakeDelayedEcho(83, 3000);
+    const auto expected = RunDirect(input);
+    constexpr sdk::FrameMetadata kMetadata{77, 123456789};
+    const auto wire = EncodeInput(input, kMetadata);
+
+    fg::PortOut<std::byte> source;
+    sdk::FrameAlgorithmAdapter<PulseCompressionAlgorithm> adapter{
+        MakeParams()};
+    fg::PortIn<std::byte> sink;
+    fg::connect(source, adapter.in, kMaximumInputWireBytes);
+    fg::connect(adapter.out, sink, kMaximumOutputWireBytes);
+
+    const std::size_t first = 17;
+    const std::size_t second = sdk::kFrameEnvelopeBytes + 9;
+    Publish(source, wire.data(), first);
+    Require(!adapter.process_work(),
+            "partial envelope triggered the algorithm");
+    Require(adapter.in.available() == first,
+            "partial envelope was consumed");
+
+    Publish(source, wire.data() + first, second - first);
+    Require(!adapter.process_work(),
+            "partial payload triggered the algorithm");
+    Require(adapter.in.available() == second,
+            "partial payload was consumed");
+
+    Publish(
+        source,
+        wire.data() + second,
+        wire.size() - second);
+    Require(adapter.process_work(),
+            "complete frame did not trigger the algorithm");
+    Require(adapter.stats().frames_processed == 1 &&
+                adapter.stats().frames_emitted == 1,
+            "complete frame transaction count mismatch");
+
+    const auto output_wire = Drain(sink);
+    const auto inspection = sdk::InspectFrame(
+        cy::common::Span<const std::byte>(
+            output_wire.data(), output_wire.size()),
+        kMaximumOutputWireBytes);
+    Require(
+        inspection.status ==
+            sdk::FrameParseStatus::CompleteFrame,
+        "adapter output is not a complete frame");
+    Require(
+        inspection.metadata.sequence_id ==
+                kMetadata.sequence_id &&
+            inspection.metadata.timestamp_unix_nano ==
+                kMetadata.timestamp_unix_nano,
+        "SDK metadata was not propagated");
+
+    data::OutputData decoded;
+    decoded.payload.reserve(kPoints);
+    Require(
+        sdk::FrameDataCodec<data::OutputData>::decode(
+            cy::common::Span<const std::byte>(
+                output_wire.data() +
+                    sdk::kFrameEnvelopeBytes,
+                inspection.payload_bytes),
+            decoded),
+        "adapter output payload decode failed");
+    Require(decoded.header.points == kPoints &&
+                decoded.payload == expected.payload,
+            "adapter output differs from direct output");
 }
 
 } // namespace
 
 int main() {
     try {
-        TestReferenceAccuracyPeakAndPslr();
-        TestDelayEdgesAndChannelIsolation();
-        TestReferenceAcrossFftSizes();
-        TestTransactionalBoundariesAndRingWrap();
-        TestCurrentCs16ContractAndParameterBoundary();
+        static_assert(
+            sdk::is_vector_frame_v<data::InputData>,
+            "InputData must use SDK header + vector framing");
+        static_assert(
+            sdk::is_vector_frame_v<data::OutputData>,
+            "OutputData must use SDK header + vector framing");
+        static_assert(
+            kMaximumInputWireBytes == 4132,
+            "1024-point CS16 frame must occupy 4132 wire bytes");
+
+        TestContractGate();
+        TestGoldenReferencePeakGainAndDelay();
+        TestFrameAdapterFragmentAndMetadata();
         std::cout << "qa_pulse_compression_block passed\n";
         return 0;
-    } catch (const std::exception& ex) {
-        std::cerr << "qa_pulse_compression_block failed: " << ex.what() << '\n';
+    } catch (const std::exception& error) {
+        std::cerr << "qa_pulse_compression_block failed: "
+                  << error.what() << '\n';
         return 1;
     }
 }

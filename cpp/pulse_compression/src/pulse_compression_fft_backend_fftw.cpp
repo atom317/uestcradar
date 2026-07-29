@@ -29,7 +29,7 @@ void EnsureFftwThreadsInitialized() {
 #endif
 }
 
-bool IsSmooth2357(std::size_t value) {
+[[maybe_unused]] bool IsSmooth2357(std::size_t value) {
     for (const std::size_t factor : {std::size_t{2}, std::size_t{3}, std::size_t{5},
                                      std::size_t{7}}) {
         while (value % factor == 0) value /= factor;
@@ -37,7 +37,7 @@ bool IsSmooth2357(std::size_t value) {
     return value == 1;
 }
 
-std::size_t NextPowerOfTwo(std::size_t value) {
+[[maybe_unused]] std::size_t NextPowerOfTwo(std::size_t value) {
     std::size_t result = 1;
     while (result < value) {
         if (result > std::numeric_limits<std::size_t>::max() / 2) {
@@ -89,9 +89,10 @@ std::size_t SelectFftSize(std::size_t samples_per_pulse,
 }
 
 FftwBatchBackend::FftwBatchBackend(std::size_t samples_per_pulse,
+                                   std::size_t impulse_length,
                                    std::size_t batch_count,
                                    std::size_t fftw_thread_count)
-    : fft_size_(SelectFftSize(samples_per_pulse, 256)),
+    : fft_size_(SelectFftSize(samples_per_pulse, impulse_length)),
       batch_count_(batch_count),
       data_(nullptr),
       filter_spectrum_(nullptr),

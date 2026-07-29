@@ -27,7 +27,6 @@ my_algorithm/
 开发者不得修改该目录；SDK 更新由基础设施维护者统一完成。
 
 开发者只需修改 `data.h`、算法头文件/实现、插件标识和两个测试的业务输入/断言。
-不存在 `codec.h`，无需也不得为算法增加自定义 Codec。
 
 ## 数据契约
 
@@ -61,10 +60,6 @@ SDK 按成员名自动识别 `header + payload`：`header` 必须平凡可复制
 只包含 Header 和 vector 的有效元素，不传输 vector 对象本身、capacity 或指针。
 业务元数据统一放在 `header` 中，不要在帧结构体增加第三个待传输成员。
 
-仍可使用完全平凡可复制的固定 POD（标量、平凡嵌套结构、`std::array`），SDK
-会自动走固定帧路径。两种形式都不需要 `codec.h`。禁止 `std::string`、指针、
-智能指针、Span/View、虚函数和其他外部内存所有权。
-
 生产流图中，变长帧的 Block 参数必须给出包含 32B Envelope 的最大 Wire 长度：
 
 ```yaml
@@ -86,9 +81,21 @@ public:
 
     explicit MyAlgorithm(const cycore::sdk::Params& params);
 
-    cycore::sdk::ProcessResult work(
-        const InputData& input,
-        OutputData& output) noexcept;
+	cycore::sdk::ProcessResult MyAlgorithm::work(const InputData& input,
+                                             OutputData& output) noexcept {
+    // 示例
+    const std::size_t sample_count = input.header.sample_count;
+	// 填好相关参数
+    output.header.sample_count = input.header.sample_count;
+	// 初始化vector，确保不践踏未使用的内存
+    output.payload.resize(sample_count);
+    // 定义好输入和输出之间的关系
+    for (std::size_t i = 0; i < sample_count; ++i) {
+        output.payload[i] =
+            input.payload[i] * static_cast<float>(factor_);
+    }
+    return cycore::sdk::ProcessResult::Produced;//运行完了之后返回已消费
+}
 };
 ```
 

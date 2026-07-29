@@ -29,9 +29,9 @@ constexpr std::size_t kDefaultProbeMaxBytes = 64 * 1024;
 template <typename T>
 class Probe final : public cy::common::IProbe {
 public:
-    // 💡 NOTE: The `frame_size` (measured in elements of type T) specified in the YAML configuration
-    // should align with the size calculated from metadata parameters (e.g., points * channels)
-    // to avoid data truncation before transmission.
+    // frame_size is an exact observation window measured in elements of T.
+    // Commit boundaries may split a window; snapshots become visible only
+    // after a complete, stream-aligned window has been collected.
     Probe(std::string topic,
           std::size_t frame_size,
           std::size_t max_elements = detail::kDefaultProbeMaxElements,
@@ -40,12 +40,14 @@ public:
           frame_size_(std::min(frame_size == 0 ? detail::kDefaultProbeMaxElements : frame_size,
                                max_elements)),
           max_bytes_(std::min(max_bytes, frame_size_ * sizeof(T))),
+          staging_(max_bytes_),
           snapshot_(max_bytes_) {
         if (topic_.empty()) {
             throw std::invalid_argument("probe topic must not be empty");
         }
-        if (frame_size_ == 0 || max_bytes_ < sizeof(T)) {
-            throw std::invalid_argument("probe frame size must be greater than zero");
+        if (frame_size_ == 0 || max_bytes_ != frame_size_ * sizeof(T)) {
+            throw std::invalid_argument(
+                "probe limits must hold one complete frame_size window");
         }
     }
 
@@ -60,33 +62,63 @@ public:
 
     std::size_t peek_latest(cy::common::Span<std::byte> buffer) const override {
         std::lock_guard<std::mutex> lock(snapshot_mutex_);
-        const std::size_t bytes = std::min(buffer.size(), snapshot_size_);
-        if (bytes == 0) {
+        if (snapshot_size_ != max_bytes_ || buffer.size() < snapshot_size_) {
             return 0;
         }
-        std::memcpy(buffer.data(), snapshot_.data(), bytes);
-        return bytes;
+        std::memcpy(buffer.data(), snapshot_.data(), snapshot_size_);
+        return snapshot_size_;
     }
 
     void capture_latest(const T* data, std::size_t count) noexcept {
-        if (!request_pending_.load(std::memory_order_acquire) || data == nullptr || count == 0) {
-            return;
-        }
-        if (!snapshot_mutex_.try_lock()) {
+        if (data == nullptr || count == 0) {
             return;
         }
 
-        std::unique_lock<std::mutex> lock(snapshot_mutex_, std::adopt_lock);
-        try {
-            const std::size_t max_elements_by_bytes = max_bytes_ / sizeof(T);
-            const std::size_t elements = std::min(count, std::min(frame_size_, max_elements_by_bytes));
-            const std::size_t offset = count - elements;
-            const std::size_t bytes = elements * sizeof(T);
-            std::memcpy(snapshot_.data(), data + offset, bytes);
-            snapshot_size_ = bytes;
-            request_pending_.store(false, std::memory_order_release);
-        } catch (...) {
-            // Probe capture is a passive observation path; never disturb the writer.
+        std::size_t offset = 0;
+        while (offset < count) {
+            if (!collecting_) {
+                if (!request_pending_.load(std::memory_order_acquire)) {
+                    advance_stream_position(count - offset);
+                    return;
+                }
+
+                if (stream_position_ != 0) {
+                    const std::size_t skip =
+                        std::min(count - offset, frame_size_ - stream_position_);
+                    offset += skip;
+                    advance_stream_position(skip);
+                    if (offset == count) {
+                        return;
+                    }
+                }
+
+                bool expected = true;
+                if (!request_pending_.compare_exchange_strong(
+                        expected, false,
+                        std::memory_order_acq_rel,
+                        std::memory_order_acquire)) {
+                    advance_stream_position(count - offset);
+                    return;
+                }
+                collecting_ = true;
+                staging_size_ = 0;
+            }
+
+            const std::size_t elements = std::min(
+                count - offset, frame_size_ - staging_size_);
+            std::memcpy(
+                staging_.data() + staging_size_ * sizeof(T),
+                data + offset,
+                elements * sizeof(T));
+            staging_size_ += elements;
+            offset += elements;
+            advance_stream_position(elements);
+
+            if (staging_size_ == frame_size_) {
+                publish_staging();
+                collecting_ = false;
+                staging_size_ = 0;
+            }
         }
     }
 
@@ -98,11 +130,36 @@ public:
     }
 
 private:
+    void advance_stream_position(std::size_t count) noexcept {
+        const std::size_t remaining = frame_size_ - stream_position_;
+        if (count < remaining) {
+            stream_position_ += count;
+            return;
+        }
+        stream_position_ = (count - remaining) % frame_size_;
+    }
+
+    void publish_staging() noexcept {
+        if (!snapshot_mutex_.try_lock()) {
+            request_pending_.store(true, std::memory_order_release);
+            return;
+        }
+
+        std::unique_lock<std::mutex> lock(snapshot_mutex_, std::adopt_lock);
+        std::memcpy(snapshot_.data(), staging_.data(), max_bytes_);
+        snapshot_size_ = max_bytes_;
+    }
+
     std::string topic_;
     std::size_t frame_size_ = 0;
     std::size_t max_bytes_ = 0;
 
     std::atomic<bool> request_pending_{false};
+    std::vector<std::byte> staging_;
+    std::size_t stream_position_ = 0;
+    std::size_t staging_size_ = 0;
+    bool collecting_ = false;
+
     mutable std::mutex snapshot_mutex_;
     std::vector<std::byte> snapshot_;
     std::size_t snapshot_size_ = 0;

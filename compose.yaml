@@ -1,0 +1,10 @@
+services:
+  helloworld:
+    container_name: helloworld
+    platform: linux/arm64
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        BASE_IMAGE: registry.chengyistudio.com/cxx/ubuntu:24.04
+    image: registry.chengyistudio.com/cxx/helloworld:0.2.0

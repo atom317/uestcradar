@@ -1,0 +1,5 @@
+*
+!docker/
+!docker/Dockerfile
+!workspace/
+!workspace/hello.cpp

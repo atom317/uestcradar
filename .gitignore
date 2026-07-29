@@ -23,6 +23,7 @@
 **/Makefile
 *.o
 *.a
+workspace/hello
 
 # 3. 忽略 build 和 build_cross 构建目录下的所有生成内容
 **/build/**

@@ -178,3 +178,32 @@ docker compose -f workspace/sidecar/tools/compose.e2e-benchmark.yaml \
 `WAVE_PERIOD_SECONDS` 制造波峰波谷。容器分别输出 producer 与 consumer 的
 JSON 指标。Docker Compose 用同一宿主机的 monotonic clock 统计单向延迟；跨
 物理机执行 P50/P99 前必须先使用 PTP 等方式校时。
+
+---
+
+## 7. Sidecar 镜像构建与发布流程
+
+> **⚠️ 注意：本目录仅供基建维护人员阅读**
+>
+> 本目录包含了雷达分布式通信代理 Sidecar 的源码。算法开发与部署人员无需自行编译源码，只需要拉取构建发布的 `sidecar` 镜像即可在基础设施 Compose 环境或 Kubernetes 中运行。
+
+### 构建并发布 Sidecar 运行镜像
+
+当您修改了 `sidecar` 的底层 UCX 网络传输、Forwarder 转发引擎或 Telemetry 监控逻辑后，需要重新打包 Sidecar 运行镜像并推送到私有仓库。
+
+请按照以下步骤执行发布：
+
+```bash
+# 1. 必须退回项目根目录执行构建（以包含 common/ringbuf、sdk 及 proto 依赖）
+cd ../../../
+docker build --target runtime -t registry.chengyistudio.com/cxx/sidecar:latest -f workspace/sidecar/Dockerfile .
+
+# 2. 标记特定的稳定版本号 (推荐)
+docker tag registry.chengyistudio.com/cxx/sidecar:latest registry.chengyistudio.com/cxx/sidecar:0.1.0
+
+# 3. 登录并推送至私有镜像源
+docker login registry.chengyistudio.com
+docker push registry.chengyistudio.com/cxx/sidecar:latest
+```
+
+发布完成后，算法模块的 `docker-compose.infra.yaml` 配置文件即可直接拉取并运行最新版本的 Sidecar 代理了。

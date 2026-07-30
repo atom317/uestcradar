@@ -23,7 +23,7 @@ graph TD
 请直接使用本目录为您准备好的 `docker-compose.infra.yaml` 启动基座：
 
 ```bash
-docker compose -f docker-compose.infra.yaml up -d
+docker compose -f docker-compose.infra.yaml up -d --force-recreate
 ```
 
 启动成功后，水管已经接通，模拟数据已经堵在 `sidecar-beta` 的内存中，等待您的算法提取。
@@ -66,10 +66,10 @@ int main(int argc, char *argv[]) {
 ## 第三步：算法构建
 
 写好算法后，使用本目录极简的 `Dockerfile` 编译出您的算法容器。
-（得益于底层的 `algo-base`，即使这是个包含 CMake 和 Qt5 的工程，编译过程也极其快速！）
+（得益于底层的 `algo-base`，使用 `--pull` 可确保拉取最新的基座镜像，避免 SDK ABI 不一致问题！）
 
 ```bash
-docker build -t qt5-algorithm:dev .
+docker build --pull -t qt5-algorithm:dev .
 ```
 
 ## 第四步：运行与调试

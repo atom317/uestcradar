@@ -13,45 +13,41 @@ int main() {
 
         Input<IQFrame> input;
         Output<PulseCompressionFrame> output;
-        std::cout << "成功接入 IQ 数据源，等待数据...\n";
+        std::cout << "成功接入 IQ 数据源，持续接收数据中...\n";
 
-        auto iq = input.read();
-        auto pulse = output.create({
-            .frame_id = iq.metadata.frame_id,
-            .timestamp_unix_ns = iq.metadata.timestamp_unix_ns,
-            .channel_count = iq.metadata.channel_count,
-            .range_bin_count = iq.metadata.samples_per_channel,
-            .pulse_index = 0,
-            .pulses_per_cpi = 1,
-            .range_resolution_m = 1.0,
-        });
+        while (true) {
+            auto iq = input.read();
+            auto pulse = output.create({
+                .frame_id = iq.metadata.frame_id,
+                .timestamp_unix_ns = iq.metadata.timestamp_unix_ns,
+                .channel_count = iq.metadata.channel_count,
+                .range_bin_count = iq.metadata.samples_per_channel,
+                .pulse_index = 0,
+                .pulses_per_cpi = 1,
+                .range_resolution_m = 1.0,
+            });
 
-        std::vector<std::complex<float>> first_channel;
-        first_channel.reserve(iq.data.columns());
-        for (std::size_t channel = 0;
-             channel < iq.data.rows();
-             ++channel) {
-            for (std::size_t sample = 0;
-                 sample < iq.data.columns();
-                 ++sample) {
-                const auto value = iq.data[channel][sample];
-                pulse.data[channel][sample] = {
-                    static_cast<float>(value.i),
-                    static_cast<float>(value.q),
-                };
-                if (channel == 0) {
-                    first_channel.emplace_back(value.i, value.q);
+            for (std::size_t channel = 0;
+                 channel < iq.data.rows();
+                 ++channel) {
+                for (std::size_t sample = 0;
+                     sample < iq.data.columns();
+                     ++sample) {
+                    const auto value = iq.data[channel][sample];
+                    pulse.data[channel][sample] = {
+                        static_cast<float>(value.i),
+                        static_cast<float>(value.q),
+                    };
                 }
             }
-        }
-        output.write(pulse);
+            output.write(pulse);
 
-        RadarAlgo::process_fft_and_save(
-            first_channel, "/output/fft_result.pgm");
+            RadarAlgo::process_pulse_compression_and_save(
+                pulse, "/output/pulse_compression_result.pgm");
+        }
     } catch (const std::exception& error) {
         std::cerr << "算法处理失败：" << error.what() << '\n';
         return 1;
     }
-    std::cout << "数据处理完毕，程序退出。\n";
     return 0;
 }

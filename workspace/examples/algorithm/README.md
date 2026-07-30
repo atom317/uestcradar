@@ -99,8 +99,8 @@ docker run -d --rm \
 docker run -it --rm \
   --name my-algorithm-debug \
   --network host \
-  --ipc container:sidecar-beta \  # 共享 sidecar-beta 的内存通道
-  -v $(pwd)/output:/output \      # 挂载输出路径
+  --ipc container:sidecar-beta \
+  -v $(pwd)/output:/output \
   --entrypoint /bin/bash \
   my-radar-algorithm:dev
 ```

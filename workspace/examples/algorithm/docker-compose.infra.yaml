@@ -2,7 +2,7 @@ services:
   # 黑盒内部：负责将数据从模拟物理网段传输过来
   sidecar-alpha:
     image: registry.chengyistudio.com/cxx/sidecar:latest
-    pull_policy: missing
+    pull_policy: if_not_present
     network_mode: host
     ipc: shareable
     environment:
@@ -20,7 +20,7 @@ services:
   # 黑盒内部：模拟物理雷达，持续产生 100Hz 测试波形
   radar-source:
     image: registry.chengyistudio.com/cxx/ring-signalsource:latest
-    pull_policy: missing
+    pull_policy: if_not_present
     network_mode: host
     ipc: service:sidecar-alpha
     depends_on:
@@ -30,7 +30,7 @@ services:
   sidecar-beta:
     container_name: sidecar-beta
     image: registry.chengyistudio.com/cxx/sidecar:latest
-    pull_policy: missing
+    pull_policy: if_not_present
     network_mode: host
     ipc: shareable
     environment:

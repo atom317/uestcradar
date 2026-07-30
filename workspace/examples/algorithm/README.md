@@ -28,7 +28,7 @@ docker compose -f docker-compose.infra.yaml up -d
 
 ## 第二步：编写您的算法
 
-在这个框架下，您完全不需要关心底层网络。所有的复杂度（包括通信、内存管理）都被封装在 `sdk.h` 中，而业务数学逻辑（如 FFT）则封装在 `my_algorithm.hpp` 中。
+在框架下，您完全不需要关心底层网络。所有的复杂度（包括通信、内存管理）都被封装在 `sdk.h` 中，而业务数学逻辑（如脉冲压缩）则封装在 `my_algorithm.hpp` 中。
 
 您的主程序（`main.cpp`）将变得像自然语言一样清晰易懂。以下是使用 SDK 的标准“四步曲”伪代码：
 
@@ -90,7 +90,7 @@ docker run -d --rm \
   my-radar-algorithm:dev
 ```
 
-运行结束后，在本地的 `output` 文件夹查看 `fft_result.pgm` 的频谱结果，完成算法闭环验证。
+运行结束后，在本地的 `output` 文件夹查看 `pulse_compression_result.pgm` 的脉冲压缩结果图像，完成算法闭环验证。
 
 **模式 B：进入容器交互式调试**
 如果您的算法抛出了异常，或者希望像在本地一样使用 `gdb` 或修改代码，请将 `--entrypoint` 覆盖为 `/bin/bash` 并开启交互终端（`-it`）：

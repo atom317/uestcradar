@@ -1,9 +1,12 @@
 # ARM64 C++ 镜像本地调试、推送与部署指南
 
-本文以 `workspace/hello.cpp` 为例，说明完整开发链路：
+本文以 `workspace/helloworld/main.cpp` 为例，说明完整开发链路：
 
 如果部署环境不能访问互联网和 Harbor，但 Windows 与 ARM64 服务器局域网互通，请改用
-[无互联网、局域网版开发与部署指南](OFFLINE_DEVELOPMENT_GUIDE.md)。
+[无互联网、局域网版开发与部署指南](OFFLINE.md)。
+
+如果客户程序使用 Qt 5.15、qmake 和 Qt Core，请参考
+[Qt 5.15 + qmake + Qt Core ARM64 迁移示例](../qt5core/README.md)。
 
 ```text
 Windows AMD64 修改源码
@@ -21,10 +24,10 @@ ARM64 服务器拉取并持续运行
 
 ### 1. Windows 本地调试
 
-在项目根目录打开 PowerShell：
+进入 Hello World Docker 目录：
 
 ```powershell
-Set-Location C:\home\cxx\uestcradar
+Set-Location C:\home\cxx\uestcradar\docker\helloworld
 
 $image = "registry.chengyistudio.com/cxx/helloworld:0.2.0"
 $env:HELLOWORLD_IMAGE = $image
@@ -100,19 +103,22 @@ Hello, World!
 ```text
 uestcradar/
 ├── .dockerignore
-├── compose.yaml
 ├── docker/
-│   ├── Dockerfile
-│   ├── build-local.ps1
-│   └── DEVELOPMENT_GUIDE.md
+│   └── helloworld/
+│       ├── compose.yaml
+│       ├── Dockerfile
+│       ├── build-local.ps1
+│       ├── README.md
+│       └── OFFLINE.md
 └── workspace/
-    └── hello.cpp
+    └── helloworld/
+        └── main.cpp
 ```
 
-- `workspace/hello.cpp`：C++ 源码。
-- `docker/Dockerfile`：编译并封装 ARM64 程序。
-- `compose.yaml`：Windows 本地构建和运行配置。
-- `docker/build-local.ps1`：只构建镜像、不启动程序的一键脚本。
+- `workspace/helloworld/main.cpp`：C++ 源码。
+- `docker/helloworld/Dockerfile`：编译并封装 ARM64 程序。
+- `docker/helloworld/compose.yaml`：Windows 本地构建和运行配置。
+- `docker/helloworld/build-local.ps1`：只构建镜像、不启动程序的一键脚本。
 - `.dockerignore`：限制 Docker 构建上下文。
 
 ## 三、环境要求
@@ -157,7 +163,7 @@ $env:HELLOWORLD_IMAGE = $image
 编辑：
 
 ```text
-workspace/hello.cpp
+workspace/helloworld/main.cpp
 ```
 
 当前示例是持续运行程序，每秒打印一次日志。`std::endl` 会刷新标准输出，所以日志能立即显示。
@@ -211,7 +217,7 @@ docker compose down
 如果只想将 ARM64 镜像构建并加载到 Docker Desktop：
 
 ```powershell
-.\docker\build-local.ps1 -Image $image
+.\build-local.ps1 -Image $image
 ```
 
 注意：这条命令不会启动容器，因此不会出现持续的 `Hello, World!` 日志。
@@ -440,7 +446,7 @@ Windows 上的 ARM64 模拟测试可以发现：
 原因：执行的是只构建脚本：
 
 ```powershell
-.\docker\build-local.ps1
+.\build-local.ps1
 ```
 
 它不会启动程序。要构建、启动并观察日志，执行：

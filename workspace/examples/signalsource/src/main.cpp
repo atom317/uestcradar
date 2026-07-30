@@ -7,11 +7,26 @@
 #include <complex>
 #include <cstdint>
 #include <iostream>
+#include <thread>
 #include <vector>
 
 int main() {
     try {
         using namespace uestcradar;
+
+        // 启动独立线程作 Loopback 数据消费，解锁算法输出背压
+        std::thread drain_thread([]() {
+            try {
+                Input<PulseCompressionFrame> pc_input;
+                std::cout << "[signalsource 回环端] 成功启动 Loopback 接收线程，持续释放槽位...\n";
+                while (true) {
+                    auto frame = pc_input.read();
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "[signalsource 回环端] 接收异常退出: " << e.what() << "\n";
+            }
+        });
+        drain_thread.detach();
 
         Output<IQFrame> output;
         std::vector<std::complex<float>> waveform(1024);
@@ -46,6 +61,9 @@ int main() {
                 };
             }
             output.write(frame);
+
+            // 保持 100Hz 稳定模拟物理雷达发送帧率 (10ms)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     } catch (const std::exception& error) {
         std::cerr << "发送 IQ 数据失败：" << error.what() << '\n';

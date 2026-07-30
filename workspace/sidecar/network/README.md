@@ -1,8 +1,7 @@
 # UCX Network 模块
 
-本目录是可独立构建的点对点 UCX/UCP 字节传输模块。当前里程碑只提供
-`UCXTransport`、功能测试和双容器 benchmark；尚未接入 Sidecar 的
-`main.cpp`、RingBuffer、Forwarder 或 Telemetry。
+本目录是可独立构建的点对点 UCX/UCP 字节传输模块。它只处理普通内存
+span、UCX endpoint、异步请求和内存注册，不依赖 RingBuffer。
 
 ## 边界
 
@@ -11,9 +10,13 @@
   `UCXRequest`；调用者必须保持 buffer 有效，直到 `wait()` 完成。
 - 每个实例使用 `UCS_THREAD_MODE_SINGLE`，同一个 transport 只能由一个线程驱动。
 - Payload 是裸字节，模块不做序列化、分帧、路由、重试或业务解析。
+- `register_memory()` 使用 `ucp_mem_map` 注册任意 CPU 内存；
+  `send/receive` 可携带对应的 `UCXMemoryRegion`，并拒绝越界 span。
 - tag `UINT64_MAX` 和 `UINT64_MAX - 1` 保留给内部建连握手，调用方不要使用。
-- 当前实现不承诺应用 buffer 的零拷贝；是否走 RDMA、TCP 或共享内存由 UCX
-  运行时选择。
+- `functional` 模式允许 UCX 自动选择协议，只用于功能验证。
+- `strict_rdma` 模式限定 RC，并强制 rendezvous/get_zcopy；它仍要求可用
+  RDMA 设备、驱动、锁页权限和足够的 memlock。TCP 测试不构成 DMA
+  零拷贝证明。
 
 ## 独立构建与测试
 
@@ -34,6 +37,7 @@ ctest --test-dir build/sidecar-network --output-on-failure
 - `libcycomm_network.a`
 - `ucx-transport-test`
 - `ucx-network-benchmark`
+- `sidecar-network-benchmark`
 
 ## TCP 双容器基线
 

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 inline constexpr char kUpstreamBufName[] = "/uestcradar_upstream";
 inline constexpr char kDownstreamBufName[] = "/uestcradar_downstream";
@@ -60,6 +61,20 @@ static_assert(offsetof(RingBufferHeader, shutdown) == 192);
     RingBuffer* ring,
     void* data,
     std::size_t len);
+
+// Zero-copy SPSC primitives. Returned spans never cross the physical end of
+// the ring. The owning cursor must not be advanced by any other call before
+// the matching commit.
+[[nodiscard]] std::span<const std::byte> ringbuf_peek_read(
+    RingBuffer* ring) noexcept;
+[[nodiscard]] bool ringbuf_commit_read(
+    RingBuffer* ring,
+    std::size_t len) noexcept;
+[[nodiscard]] std::span<std::byte> ringbuf_reserve_write(
+    RingBuffer* ring) noexcept;
+[[nodiscard]] bool ringbuf_commit_write(
+    RingBuffer* ring,
+    std::size_t len) noexcept;
 
 [[nodiscard]] std::size_t ringbuf_capacity(
     const RingBuffer* ring) noexcept;

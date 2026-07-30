@@ -9,11 +9,19 @@
 
 namespace sidecar::network {
 
+enum class DataPathMode {
+    functional,
+    strict_rdma,
+};
+
 struct EndpointOptions {
     std::string address;
     std::uint16_t port{13337};
     std::chrono::milliseconds timeout{10'000};
+    DataPathMode data_path{DataPathMode::functional};
 };
+
+class UCXMemoryRegion;
 
 class UCXRequest {
 public:
@@ -38,6 +46,28 @@ private:
     friend class UCXTransport;
 };
 
+class UCXMemoryRegion {
+public:
+    struct State;
+
+    UCXMemoryRegion() noexcept;
+    UCXMemoryRegion(UCXMemoryRegion&& other) noexcept;
+    UCXMemoryRegion& operator=(UCXMemoryRegion&& other) noexcept;
+    UCXMemoryRegion(const UCXMemoryRegion&) = delete;
+    UCXMemoryRegion& operator=(const UCXMemoryRegion&) = delete;
+    ~UCXMemoryRegion();
+
+    [[nodiscard]] bool valid() const noexcept;
+    [[nodiscard]] std::size_t size() const noexcept;
+
+private:
+    explicit UCXMemoryRegion(std::shared_ptr<State> state) noexcept;
+
+    std::shared_ptr<State> state_;
+
+    friend class UCXTransport;
+};
+
 class UCXTransport {
 public:
     // Opaque implementation type; public only so UCX C callbacks can name it.
@@ -54,13 +84,18 @@ public:
 
     [[nodiscard]] UCXRequest send(
         std::span<const std::byte> buffer,
-        std::uint64_t tag);
+        std::uint64_t tag,
+        const UCXMemoryRegion* memory = nullptr);
     [[nodiscard]] UCXRequest receive(
         std::span<std::byte> buffer,
         std::uint64_t tag,
-        std::uint64_t tag_mask = UINT64_MAX);
+        std::uint64_t tag_mask = UINT64_MAX,
+        const UCXMemoryRegion* memory = nullptr);
 
-    void progress();
+    [[nodiscard]] UCXMemoryRegion register_memory(
+        std::span<std::byte> memory);
+
+    bool progress();
     void wait(
         UCXRequest& request,
         std::chrono::milliseconds timeout = std::chrono::seconds{10});

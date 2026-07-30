@@ -46,8 +46,8 @@
    - 各节点 Sidecar 物理地位对等，不设立主从 (Master-Slave) 节点；
    - 依赖静态配置（如 `PEER_HOST`, `PEER_PORT`）建立专用的点对点 RDMA/UCX 通信通道。
 2. **单向物理数据管道 (Unidirectional Data Pipe)**：
-   - 上游 Sidecar A 从本机的 `/upstreambuf` 零拷贝读取数据，通过 `forwarder` 泵入 `network` 模块打入网络；
-   - 下游 Sidecar B 的 `network` 模块从网络接收字节流，通过 `forwarder` 泵出并直接落盘写入本机的 `/downstreambuf` 给下游算法消费。
+   - Sidecar 从本机 worker 写入的 `/downstreambuf` 零拷贝读取数据，通过 `forwarder` 泵入网络；
+   - Sidecar 从网络接收字节流，通过 `forwarder` 直接写入本机 `/upstreambuf` 给 worker 消费。
 3. **解耦的旁路监控拓扑 (Decoupled Telemetry)**：
    - 多个 Sidecar 分别独立向中央 `telemetry-web` 节点点对点发送 100ms UDP 监控快照；
    - 中央监控节点仅为只读观察者，Sidecar 之间的主通信链路完全脱离监控节点的干预。
@@ -56,7 +56,7 @@
 
 ## 3. 内部模块职责与物理解耦边界
 
-系统的物理指挥官 `main.cpp`（组合根 Composition Root）负责在启动时统一实例化并组装各模块。当前里程碑只启用 `ringbuf` 与 `telemetry`；`network` 和 `forwarder` 保留为后续接入点，不在主循环中伪造搬运逻辑。
+系统的物理指挥官 `main.cpp`（组合根 Composition Root）负责在启动时统一实例化 RingBuffer、UCXTransport、注册内存、Forwarder 与 Telemetry。
 
 ```text
                                   main.cpp (组合根 Composition Root)
@@ -115,9 +115,9 @@ workspace/sidecar/
 │   ├── README.md           # 监控模块极简设计规范
 │   ├── telemetry.hpp
 │   └── telemetry.cpp
-├── tools/                  # 仅测试期的 Sidecar 侧网络仿真适配器
-│   ├── jitter_io.hpp       # 注入 RingBuffer 的抖动源/汇声明
-│   └── jitter_io.cpp       # upstream 写入、downstream 读取
+├── tools/                  # 外部全链路测试工具
+│   ├── network_benchmark.cpp
+│   └── compose.network-benchmark.yaml
 ├── network/                # 极简 UCX / RDMA 物理网络搬运模块
 │   ├── README.md           # 网络模块极简设计规范
 │   ├── ucx_transport.hpp   # UCXTransport 声明
@@ -127,7 +127,9 @@ workspace/sidecar/
 └── forwarder/              # 数据转发引擎/搬运工
     ├── README.md           # 转发引擎模块设计规范（奥卡姆剃刀法则）
     ├── forwarder.hpp       # 引擎接口与状态声明
-    └── forwarder.cpp       # 引擎高性能死循环实现
+    ├── forwarder.cpp       # 引擎双向状态机
+    ├── forwarder_protocol.hpp
+    └── forwarder_test.cpp
 ```
 
 `ringbuf` 的物理位置为 `workspace/common/ringbuf/`，它是 Sidecar 与 SDK 共享的 ABI 契约，不属于任一方的私有实现。
@@ -145,9 +147,11 @@ workspace/sidecar/
 
 ## 6. 当前启动模型
 
-`sidecar` 不接收模式参数。进程启动后总是创建 `/upstreambuf` 和 `/downstreambuf` 两个 SPSC 字节环，并在后台启动 telemetry。两个环使用相同的 `RING_CAPACITY_BYTES`，未配置时默认为 1 MiB。
-
-在尚未接入真实 network/forwarder 的测试阶段，`sidecar/tools/jitter_io.*` 由 `main.cpp` 调用：抖动数据源向 worker-facing 的 upstream 注入模拟网络输入，抖动数据汇从 worker-facing 的 downstream 取走模拟网络输出。它们不创建共享内存，也不是独立可执行文件。
+`sidecar` 不接收模式参数。进程启动后创建 `/upstreambuf` 和
+`/downstreambuf` 两个 SPSC 字节环，建立一个双向 UCX endpoint，注册两个
+共享内存数据区，并在后台启动 Forwarder 和 Telemetry。Forwarder 使用
+credit 协调每次连续传输长度，Payload 的 RingBuffer 游标只在 UCX 完成后
+提交。
 
 Compose 为每个节点启动一个 Sidecar 和一个共享 IPC namespace 的实际 worker：
 
@@ -157,4 +161,4 @@ BETA_RING_CAPACITY_BYTES=16777216 \
 docker compose up --build
 ```
 
-`shm_size` 必须大于两个数据区与两个 4096 字节控制头的总和，建议保留额外余量。真实 network/forwarder 接入后，将以对应实现替换这些仅用于演示水位与背压的测试循环。
+`shm_size` 必须大于两个数据区与两个 4096 字节控制头的总和，建议保留额外余量。`SIDECAR_UCX_ROLE` 选择 listen/connect，`SIDECAR_UCX_DATA_PATH` 选择 functional/strict-rdma，`FORWARDER_MAX_TRANSFER_BYTES` 限制单次连续传输。`SIDECAR_UCX_CONNECT_TIMEOUT_MS` 是单次建连尝试的上限（默认 2000 ms）；端点暂不可用时 Sidecar 保持遥测并在后台重试。

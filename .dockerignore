@@ -18,9 +18,10 @@
 !workspace/sidecar/telemetry/
 !workspace/sidecar/telemetry/telemetry.hpp
 !workspace/sidecar/telemetry/telemetry.cpp
+!workspace/sidecar/forwarder/
+!workspace/sidecar/forwarder/**
 !workspace/sidecar/tools/
-!workspace/sidecar/tools/jitter_io.hpp
-!workspace/sidecar/tools/jitter_io.cpp
+!workspace/sidecar/tools/network_benchmark.cpp
 !workspace/sidecar/network/
 !workspace/sidecar/network/**
 !workspace/proto/

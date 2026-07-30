@@ -14,6 +14,12 @@ services:
     environment:
       NODE_ID: Radar-Alpha
       RING_CAPACITY_BYTES: ${ALPHA_RING_CAPACITY_BYTES:-8388608}
+      FORWARDER_MAX_TRANSFER_BYTES: ${FORWARDER_MAX_TRANSFER_BYTES:-262144}
+      SIDECAR_UCX_ROLE: listen
+      SIDECAR_UCX_BIND_HOST: 0.0.0.0
+      SIDECAR_UCX_PORT: ${SIDECAR_UCX_PORT:-13337}
+      SIDECAR_UCX_DATA_PATH: ${SIDECAR_UCX_DATA_PATH:-functional}
+      UCX_TLS: ${UCX_TLS:-tcp,self}
       TELEMETRY_HOST: ${TELEMETRY_HOST:-telemetry-web}
       TELEMETRY_PORT: ${TELEMETRY_PORT:-9900}
       SAMPLE_INTERVAL: ${SAMPLE_INTERVAL:-100}
@@ -30,6 +36,8 @@ services:
     image: ${WORKER_IMAGE:-registry.chengyistudio.com/cxx/ring-worker:0.1.0}
     ipc: service:sidecar-alpha
     init: true
+    environment:
+      WORKER_BLOCK_BYTES: ${WORKER_BLOCK_BYTES:-262144}
     depends_on:
       - sidecar-alpha
 
@@ -47,11 +55,18 @@ services:
     environment:
       NODE_ID: Radar-Beta
       RING_CAPACITY_BYTES: ${BETA_RING_CAPACITY_BYTES:-8388608}
+      FORWARDER_MAX_TRANSFER_BYTES: ${FORWARDER_MAX_TRANSFER_BYTES:-262144}
+      SIDECAR_UCX_ROLE: connect
+      SIDECAR_UCX_PEER_HOST: sidecar-alpha
+      SIDECAR_UCX_PORT: ${SIDECAR_UCX_PORT:-13337}
+      SIDECAR_UCX_DATA_PATH: ${SIDECAR_UCX_DATA_PATH:-functional}
+      UCX_TLS: ${UCX_TLS:-tcp,self}
       TELEMETRY_HOST: ${TELEMETRY_HOST:-telemetry-web}
       TELEMETRY_PORT: ${TELEMETRY_PORT:-9900}
       SAMPLE_INTERVAL: ${SAMPLE_INTERVAL:-100}
     depends_on:
       - telemetry-web
+      - sidecar-alpha
 
   worker-beta:
     container_name: worker-beta
@@ -63,6 +78,8 @@ services:
     image: ${WORKER_IMAGE:-registry.chengyistudio.com/cxx/ring-worker:0.1.0}
     ipc: service:sidecar-beta
     init: true
+    environment:
+      WORKER_BLOCK_BYTES: ${WORKER_BLOCK_BYTES:-262144}
     depends_on:
       - sidecar-beta
 

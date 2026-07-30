@@ -78,6 +78,16 @@ struct UCXRequest::State {
     bool complete{false};
     bool receive{false};
     std::weak_ptr<UCXTransport::Impl> owner;
+    std::shared_ptr<UCXMemoryRegion::State> memory;
+};
+
+struct UCXMemoryRegion::State {
+    std::shared_ptr<UCXTransport::Impl> owner;
+    ucp_mem_h handle{nullptr};
+    std::byte* address{nullptr};
+    std::size_t length{0};
+
+    ~State();
 };
 
 struct UCXTransport::Impl : std::enable_shared_from_this<Impl> {
@@ -91,11 +101,33 @@ struct UCXTransport::Impl : std::enable_shared_from_this<Impl> {
         close();
     }
 
-    void initialize() {
+    void initialize(DataPathMode data_path) {
         ucp_config_t* config = nullptr;
         ucs_status_t status = ::ucp_config_read(nullptr, nullptr, &config);
         if (status != UCS_OK) {
             throw_ucx("ucp_config_read", status);
+        }
+
+        const auto configure = [config](
+                                   const char* name,
+                                   const char* value) {
+            const ucs_status_t result =
+                ::ucp_config_modify(config, name, value);
+            if (result != UCS_OK) {
+                throw_ucx(name, result);
+            }
+        };
+
+        try {
+            if (data_path == DataPathMode::strict_rdma) {
+                configure("TLS", "rc");
+                configure("RNDV_THRESH", "0");
+                configure("ZCOPY_THRESH", "0");
+                configure("RNDV_SCHEME", "get_zcopy");
+            }
+        } catch (...) {
+            ::ucp_config_release(config);
+            throw;
         }
 
         ucp_params_t context_params {};
@@ -182,6 +214,44 @@ struct UCXTransport::Impl : std::enable_shared_from_this<Impl> {
 };
 
 namespace {
+
+bool contains(
+    const UCXMemoryRegion::State& region,
+    const std::byte* address,
+    std::size_t length) noexcept {
+    if (address == nullptr || region.address == nullptr ||
+        length > region.length) {
+        return false;
+    }
+    const auto begin =
+        reinterpret_cast<std::uintptr_t>(region.address);
+    const auto current =
+        reinterpret_cast<std::uintptr_t>(address);
+    if (current < begin) {
+        return false;
+    }
+    const std::uintptr_t offset = current - begin;
+    return offset <= region.length - length;
+}
+
+std::shared_ptr<UCXMemoryRegion::State> checked_memory(
+    const std::shared_ptr<UCXTransport::Impl>& owner,
+    std::shared_ptr<UCXMemoryRegion::State> memory,
+    const std::byte* address,
+    std::size_t length) {
+    if (memory == nullptr) {
+        return {};
+    }
+    if (memory->owner.get() != owner.get()) {
+        throw std::invalid_argument(
+            "UCX memory region belongs to another transport");
+    }
+    if (!contains(*memory, address, length)) {
+        throw std::invalid_argument(
+            "UCX buffer is outside the registered memory region");
+    }
+    return memory;
+}
 
 void endpoint_error(void* argument, ucp_ep_h, ucs_status_t status) {
     auto* impl = static_cast<UCXTransport::Impl*>(argument);
@@ -277,6 +347,13 @@ void handshake_client(UCXTransport& transport, std::chrono::milliseconds timeout
 
 }  // namespace
 
+UCXMemoryRegion::State::~State() {
+    if (handle != nullptr && owner != nullptr &&
+        owner->context != nullptr) {
+        ::ucp_mem_unmap(owner->context, handle);
+    }
+}
+
 UCXRequest::UCXRequest() noexcept = default;
 
 UCXRequest::UCXRequest(std::shared_ptr<State> state) noexcept
@@ -318,6 +395,23 @@ std::size_t UCXRequest::bytes_transferred() const {
     return state_->bytes;
 }
 
+UCXMemoryRegion::UCXMemoryRegion() noexcept = default;
+UCXMemoryRegion::UCXMemoryRegion(
+    std::shared_ptr<State> state) noexcept
+    : state_(std::move(state)) {}
+UCXMemoryRegion::UCXMemoryRegion(UCXMemoryRegion&& other) noexcept = default;
+UCXMemoryRegion& UCXMemoryRegion::operator=(
+    UCXMemoryRegion&& other) noexcept = default;
+UCXMemoryRegion::~UCXMemoryRegion() = default;
+
+bool UCXMemoryRegion::valid() const noexcept {
+    return state_ != nullptr && state_->handle != nullptr;
+}
+
+std::size_t UCXMemoryRegion::size() const noexcept {
+    return state_ == nullptr ? 0 : state_->length;
+}
+
 UCXTransport::UCXTransport(std::shared_ptr<Impl> impl) noexcept
     : impl_(std::move(impl)) {}
 
@@ -327,7 +421,7 @@ UCXTransport::~UCXTransport() = default;
 
 UCXTransport UCXTransport::accept_one(const EndpointOptions& options) {
     auto impl = std::make_shared<Impl>();
-    impl->initialize();
+    impl->initialize(options.data_path);
     Address address{options.address, options.port, true};
     const struct addrinfo* resolved = address.get();
 
@@ -379,7 +473,7 @@ UCXTransport UCXTransport::accept_one(const EndpointOptions& options) {
 
 UCXTransport UCXTransport::connect(const EndpointOptions& options) {
     auto impl = std::make_shared<Impl>();
-    impl->initialize();
+    impl->initialize(options.data_path);
     Address address{options.address, options.port, false};
     const struct addrinfo* resolved = address.get();
 
@@ -403,7 +497,8 @@ UCXTransport UCXTransport::connect(const EndpointOptions& options) {
 
 UCXRequest UCXTransport::send(
     std::span<const std::byte> buffer,
-    std::uint64_t tag) {
+    std::uint64_t tag,
+    const UCXMemoryRegion* memory) {
     if (impl_ == nullptr || impl_->endpoint == nullptr) {
         throw std::logic_error("UCX transport is not connected");
     }
@@ -415,6 +510,11 @@ UCXRequest UCXTransport::send(
     auto state = std::make_shared<UCXRequest::State>();
     state->owner = impl_;
     state->bytes = buffer.size();
+    state->memory = checked_memory(
+        impl_,
+        memory == nullptr ? nullptr : memory->state_,
+        buffer.data(),
+        buffer.size());
 
     ucp_request_param_t params {};
     params.op_attr_mask =
@@ -422,6 +522,10 @@ UCXRequest UCXTransport::send(
         UCP_OP_ATTR_FIELD_USER_DATA;
     params.cb.send = send_complete;
     params.user_data = state.get();
+    if (state->memory != nullptr) {
+        params.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMH;
+        params.memh = state->memory->handle;
+    }
 
     void* request = ::ucp_tag_send_nbx(
         impl_->endpoint,
@@ -445,7 +549,8 @@ UCXRequest UCXTransport::send(
 UCXRequest UCXTransport::receive(
     std::span<std::byte> buffer,
     std::uint64_t tag,
-    std::uint64_t tag_mask) {
+    std::uint64_t tag_mask,
+    const UCXMemoryRegion* memory) {
     if (impl_ == nullptr || impl_->endpoint == nullptr) {
         throw std::logic_error("UCX transport is not connected");
     }
@@ -457,13 +562,25 @@ UCXRequest UCXTransport::receive(
     auto state = std::make_shared<UCXRequest::State>();
     state->owner = impl_;
     state->receive = true;
+    state->memory = checked_memory(
+        impl_,
+        memory == nullptr ? nullptr : memory->state_,
+        buffer.data(),
+        buffer.size());
 
     ucp_request_param_t params {};
     params.op_attr_mask =
         UCP_OP_ATTR_FIELD_CALLBACK |
-        UCP_OP_ATTR_FIELD_USER_DATA;
+        UCP_OP_ATTR_FIELD_USER_DATA |
+        UCP_OP_ATTR_FIELD_RECV_INFO;
     params.cb.recv = receive_complete;
     params.user_data = state.get();
+    ucp_tag_recv_info_t immediate_info {};
+    params.recv_info.tag_info = &immediate_info;
+    if (state->memory != nullptr) {
+        params.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMH;
+        params.memh = state->memory->handle;
+    }
 
     void* request = ::ucp_tag_recv_nbx(
         impl_->worker,
@@ -477,6 +594,7 @@ UCXRequest UCXTransport::receive(
     }
     if (request == nullptr) {
         state->status = UCS_OK;
+        state->bytes = immediate_info.length;
         state->complete = true;
     } else {
         state->native_request = request;
@@ -485,12 +603,44 @@ UCXRequest UCXTransport::receive(
     return UCXRequest{std::move(state)};
 }
 
-void UCXTransport::progress() {
+UCXMemoryRegion UCXTransport::register_memory(
+    std::span<std::byte> memory) {
+    if (impl_ == nullptr || impl_->context == nullptr) {
+        throw std::logic_error("UCX transport is not initialized");
+    }
+    if (memory.empty()) {
+        throw std::invalid_argument(
+            "UCX memory region must not be empty");
+    }
+
+    ucp_mem_map_params_t params {};
+    params.field_mask =
+        UCP_MEM_MAP_PARAM_FIELD_ADDRESS |
+        UCP_MEM_MAP_PARAM_FIELD_LENGTH;
+    params.address = memory.data();
+    params.length = memory.size();
+
+    ucp_mem_h handle = nullptr;
+    const ucs_status_t status =
+        ::ucp_mem_map(impl_->context, &params, &handle);
+    if (status != UCS_OK) {
+        throw_ucx("ucp_mem_map", status);
+    }
+
+    auto state = std::make_shared<UCXMemoryRegion::State>();
+    state->owner = impl_;
+    state->handle = handle;
+    state->address = memory.data();
+    state->length = memory.size();
+    return UCXMemoryRegion{std::move(state)};
+}
+
+bool UCXTransport::progress() {
     if (impl_ == nullptr || impl_->worker == nullptr) {
         throw std::logic_error("UCX transport is not initialized");
     }
     impl_->check_endpoint();
-    ::ucp_worker_progress(impl_->worker);
+    return ::ucp_worker_progress(impl_->worker) != 0;
 }
 
 void UCXTransport::wait(

@@ -17,6 +17,13 @@ add_executable(ucx-network-benchmark benchmark.cpp)
 target_link_libraries(ucx-network-benchmark PRIVATE cycomm::network)
 target_compile_options(ucx-network-benchmark PRIVATE -Wall -Wextra -Wpedantic)
 
+add_executable(sidecar-network-benchmark ../tools/network_benchmark.cpp)
+target_include_directories(
+    sidecar-network-benchmark PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/..")
+target_link_libraries(sidecar-network-benchmark PRIVATE cycomm::network)
+target_compile_options(
+    sidecar-network-benchmark PRIVATE -Wall -Wextra -Wpedantic)
+
 if(BUILD_TESTING)
     add_executable(ucx-transport-test transport_test.cpp)
     target_link_libraries(ucx-transport-test PRIVATE cycomm::network)

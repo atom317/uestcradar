@@ -14,6 +14,7 @@
 namespace {
 
 using sidecar::network::EndpointOptions;
+using sidecar::network::UCXMemoryRegion;
 using sidecar::network::UCXRequest;
 using sidecar::network::UCXTransport;
 
@@ -24,12 +25,16 @@ int run_server(std::uint16_t port) {
         UCXTransport transport = UCXTransport::accept_one(
             EndpointOptions{"127.0.0.1", port, std::chrono::seconds{10}});
         std::array<std::byte, 64> input{};
-        UCXRequest receive = transport.receive(input, kTestTag);
+        UCXMemoryRegion input_memory =
+            transport.register_memory(input);
+        UCXRequest receive = transport.receive(
+            input, kTestTag, UINT64_MAX, &input_memory);
         transport.wait(receive);
         if (receive.bytes_transferred() != input.size()) {
             return 1;
         }
-        UCXRequest send = transport.send(input, kTestTag);
+        UCXRequest send =
+            transport.send(input, kTestTag, &input_memory);
         transport.wait(send);
         return 0;
     } catch (...) {
@@ -59,10 +64,16 @@ int main() {
         for (std::size_t index = 0; index < output.size(); ++index) {
             output[index] = static_cast<std::byte>(index);
         }
-        UCXRequest send = transport.send(output, kTestTag);
+        UCXMemoryRegion output_memory =
+            transport.register_memory(output);
+        UCXRequest send =
+            transport.send(output, kTestTag, &output_memory);
         transport.wait(send);
         std::array<std::byte, 64> reply{};
-        UCXRequest receive = transport.receive(reply, kTestTag);
+        UCXMemoryRegion reply_memory =
+            transport.register_memory(reply);
+        UCXRequest receive = transport.receive(
+            reply, kTestTag, UINT64_MAX, &reply_memory);
         transport.wait(receive);
         if (reply != output || receive.bytes_transferred() != reply.size()) {
             throw std::runtime_error("payload mismatch");
@@ -77,6 +88,18 @@ int main() {
         }
         if (!empty_rejected) {
             throw std::runtime_error("empty send was not rejected");
+        }
+
+        bool outside_region_rejected = false;
+        try {
+            static_cast<void>(transport.send(
+                reply, kTestTag, &output_memory));
+        } catch (const std::invalid_argument&) {
+            outside_region_rejected = true;
+        }
+        if (!outside_region_rejected) {
+            throw std::runtime_error(
+                "out-of-region send was not rejected");
         }
     } catch (const std::exception& error) {
         std::cerr << "ucx-transport-test: " << error.what() << '\n';

@@ -260,6 +260,123 @@ std::int32_t ringbuf_read(
     return static_cast<std::int32_t>(read_size);
 }
 
+std::span<const std::byte> ringbuf_peek_read(
+    RingBuffer* ring) noexcept {
+    if (ring == nullptr || ring->header == nullptr ||
+        ring->data == nullptr) {
+        return {};
+    }
+
+    const std::size_t capacity = ringbuf_capacity(ring);
+    const std::uint64_t read =
+        ring->header->read_position.load(std::memory_order_relaxed);
+    const std::uint64_t write =
+        ring->header->write_position.load(std::memory_order_acquire);
+    if (capacity == 0 || write < read || write - read > capacity) {
+        return {};
+    }
+
+    const std::size_t available =
+        static_cast<std::size_t>(write - read);
+    const std::size_t position =
+        static_cast<std::size_t>(read % capacity);
+    const std::size_t contiguous =
+        std::min(available, capacity - position);
+    return {ring->data + position, contiguous};
+}
+
+bool ringbuf_commit_read(
+    RingBuffer* ring,
+    std::size_t len) noexcept {
+    if (ring == nullptr || ring->header == nullptr) {
+        return false;
+    }
+    if (len == 0) {
+        return true;
+    }
+
+    const std::size_t capacity = ringbuf_capacity(ring);
+    const std::uint64_t read =
+        ring->header->read_position.load(std::memory_order_relaxed);
+    const std::uint64_t write =
+        ring->header->write_position.load(std::memory_order_acquire);
+    if (capacity == 0 || write < read || write - read > capacity) {
+        return false;
+    }
+    const std::size_t position =
+        static_cast<std::size_t>(read % capacity);
+    const std::size_t contiguous = std::min(
+        static_cast<std::size_t>(write - read),
+        capacity - position);
+    if (len > contiguous) {
+        return false;
+    }
+
+    ring->header->read_position.store(
+        read + len,
+        std::memory_order_release);
+    return true;
+}
+
+std::span<std::byte> ringbuf_reserve_write(
+    RingBuffer* ring) noexcept {
+    if (ring == nullptr || ring->header == nullptr ||
+        ring->data == nullptr || ringbuf_is_shutdown(ring)) {
+        return {};
+    }
+
+    const std::size_t capacity = ringbuf_capacity(ring);
+    const std::uint64_t write =
+        ring->header->write_position.load(std::memory_order_relaxed);
+    const std::uint64_t read =
+        ring->header->read_position.load(std::memory_order_acquire);
+    if (capacity == 0 || write < read || write - read > capacity) {
+        return {};
+    }
+
+    const std::size_t free =
+        capacity - static_cast<std::size_t>(write - read);
+    const std::size_t position =
+        static_cast<std::size_t>(write % capacity);
+    const std::size_t contiguous =
+        std::min(free, capacity - position);
+    return {ring->data + position, contiguous};
+}
+
+bool ringbuf_commit_write(
+    RingBuffer* ring,
+    std::size_t len) noexcept {
+    if (ring == nullptr || ring->header == nullptr ||
+        ringbuf_is_shutdown(ring)) {
+        return false;
+    }
+    if (len == 0) {
+        return true;
+    }
+
+    const std::size_t capacity = ringbuf_capacity(ring);
+    const std::uint64_t write =
+        ring->header->write_position.load(std::memory_order_relaxed);
+    const std::uint64_t read =
+        ring->header->read_position.load(std::memory_order_acquire);
+    if (capacity == 0 || write < read || write - read > capacity) {
+        return false;
+    }
+    const std::size_t position =
+        static_cast<std::size_t>(write % capacity);
+    const std::size_t contiguous = std::min(
+        capacity - static_cast<std::size_t>(write - read),
+        capacity - position);
+    if (len > contiguous) {
+        return false;
+    }
+
+    ring->header->write_position.store(
+        write + len,
+        std::memory_order_release);
+    return true;
+}
+
 std::size_t ringbuf_capacity(const RingBuffer* ring) noexcept {
     return ring == nullptr || ring->header == nullptr
                ? 0

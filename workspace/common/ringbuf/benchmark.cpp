@@ -25,6 +25,69 @@ struct BlockBenchmarkResult {
     double ops_per_sec{0.0};
 };
 
+void verify_zero_copy_wrap(const std::string& name) {
+    RingBuffer* ring = ringbuf_create(name.c_str(), 32);
+    const auto cleanup = [&] {
+        ringbuf_shutdown(ring);
+        ringbuf_close(ring);
+        ringbuf_unlink(name.c_str());
+    };
+
+    std::span<std::byte> first_write =
+        ringbuf_reserve_write(ring);
+    if (first_write.size() != 32 ||
+        !ringbuf_commit_write(ring, 24)) {
+        cleanup();
+        throw std::runtime_error(
+            "zero-copy initial write reservation failed");
+    }
+    std::span<const std::byte> first_read =
+        ringbuf_peek_read(ring);
+    if (first_read.size() != 24 ||
+        ringbuf_commit_read(ring, 25) ||
+        !ringbuf_commit_read(ring, 20)) {
+        cleanup();
+        throw std::runtime_error(
+            "zero-copy read commit validation failed");
+    }
+
+    std::span<std::byte> tail_write =
+        ringbuf_reserve_write(ring);
+    if (tail_write.size() != 8 ||
+        !ringbuf_commit_write(ring, tail_write.size())) {
+        cleanup();
+        throw std::runtime_error(
+            "zero-copy write crossed the ring tail");
+    }
+    std::span<std::byte> wrapped_write =
+        ringbuf_reserve_write(ring);
+    if (wrapped_write.size() != 20 ||
+        !ringbuf_commit_write(ring, 10)) {
+        cleanup();
+        throw std::runtime_error(
+            "zero-copy wrapped write reservation failed");
+    }
+
+    std::span<const std::byte> tail_read =
+        ringbuf_peek_read(ring);
+    if (tail_read.size() != 12 ||
+        !ringbuf_commit_read(ring, tail_read.size())) {
+        cleanup();
+        throw std::runtime_error(
+            "zero-copy read crossed the ring tail");
+    }
+    std::span<const std::byte> wrapped_read =
+        ringbuf_peek_read(ring);
+    if (wrapped_read.size() != 10 ||
+        !ringbuf_commit_read(ring, wrapped_read.size()) ||
+        !ringbuf_peek_read(ring).empty()) {
+        cleanup();
+        throw std::runtime_error(
+            "zero-copy wrapped read reservation failed");
+    }
+    cleanup();
+}
+
 // 跑单个 Block Size 的吞吐基准测试
 BlockBenchmarkResult run_block_benchmark(
     const std::string& name_prefix,
@@ -150,6 +213,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
     try {
         const std::string name_prefix =
             "/uestcradar_bm_" + std::to_string(::getpid());
+        verify_zero_copy_wrap(name_prefix + "_zero_copy");
 
         // 逐步递增的测试块大小列表 (8B ~ 512KB)
         const std::vector<std::pair<std::size_t, std::uint64_t>> test_cases = {

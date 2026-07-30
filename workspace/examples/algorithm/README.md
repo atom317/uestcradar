@@ -46,9 +46,9 @@ int main() {
 ## 第三步：打包并“热插拔”您的算法
 
 写好算法后，使用本目录极简的 `Dockerfile` 编译出您的算法容器。
-注意：由于编译需要链接 SDK，请将构建上下文指向项目根目录（`../../../`）：
+（得益于底层的 `algo-base`，您只需要在这个目录下直接执行构建即可，极其快速！）
 ```bash
-docker build -t my-radar-algorithm:dev -f Dockerfile ../../../
+docker build -t my-radar-algorithm:dev .
 ```
 
 最后，带上 `--ipc container:sidecar-beta` 这把钥匙，将您的算法像插件一样挂载到基座上运行：

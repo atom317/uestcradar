@@ -5,10 +5,9 @@ project(cycomm_sdk VERSION 1.0.0 LANGUAGES CXX)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-# The SDK carries its RingBuffer ABI dependency so that this directory can be
-# copied and built without a Sidecar checkout or access to the monorepo.
+# The SDK relies on the monorepo's shared RingBuffer implementation.
 set(CYCOMM_RINGBUF_SOURCE_DIR
-    "${CMAKE_CURRENT_SOURCE_DIR}/vendor/ringbuf"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../common/ringbuf"
     CACHE PATH "Path to the SDK's vendored RingBuffer source")
 if(NOT EXISTS "${CYCOMM_RINGBUF_SOURCE_DIR}/CMakeLists.txt")
     message(FATAL_ERROR

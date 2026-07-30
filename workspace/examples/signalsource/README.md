@@ -11,9 +11,8 @@
 当您修改了波形逻辑后，请执行以下命令将最新的模拟源推送到私有仓库（这将自动更新所有算法开发者的测试基建）：
 
 ```bash
-# 1. 必须在项目根目录下执行构建
-cd ../../../
-docker build -t my-radar-signalsource:dev -f workspace/examples/signalsource/Dockerfile .
+# 1. 在当前目录下直接执行构建
+docker build -t my-radar-signalsource:dev .
 
 # 2. 重新打标签
 docker tag my-radar-signalsource:dev registry.chengyistudio.com/cxx/ring-signalsource:latest

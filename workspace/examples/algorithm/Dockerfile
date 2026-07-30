@@ -1,30 +1,13 @@
 # syntax=docker/dockerfile:1
-ARG BASE_IMAGE=registry.chengyistudio.com/cxx/ubuntu:24.04
-FROM ${BASE_IMAGE} AS builder
+FROM registry.chengyistudio.com/cxx/algo-base:latest
 
-ENV DEBIAN_FRONTEND=noninteractive
-RUN unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends cmake g++ make \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /src
-COPY workspace/sdk/ ./sdk/
-RUN cmake -S sdk -B sdk-build \
-       -DCMAKE_BUILD_TYPE=Release \
-       -DCMAKE_INSTALL_PREFIX=/out/sdk \
-    && cmake --build sdk-build --parallel \
-    && cmake --install sdk-build
-
-COPY workspace/examples/algorithm/ ./algorithm/
-RUN cmake -S algorithm/src -B algorithm-build \
-       -DCMAKE_BUILD_TYPE=Release \
-       -DCMAKE_PREFIX_PATH=/out/sdk \
-    && cmake --build algorithm-build --parallel
-
-FROM ${BASE_IMAGE} AS runtime
 WORKDIR /app
-COPY --from=builder /src/algorithm-build/algorithm /app/algorithm
-COPY --from=builder /out/sdk/lib/libuestcradar_sdk.so /app/libuestcradar_sdk.so
-ENV LD_LIBRARY_PATH=/app
+COPY src/ ./src/
+
+# 编译算法业务代码
+RUN cmake -S src -B build -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build build --parallel \
+    && cp build/algorithm ./algorithm \
+    && rm -rf src build
+
 ENTRYPOINT ["/app/algorithm"]

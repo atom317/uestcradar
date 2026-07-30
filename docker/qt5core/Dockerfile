@@ -13,7 +13,7 @@ RUN unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
-COPY workspace/qt5core/ .
+COPY workspace/examples/qt5core/src/ .
 
 WORKDIR /build
 RUN /usr/lib/qt5/bin/qmake /src/qt5core_thread_example.pro CONFIG+=release \

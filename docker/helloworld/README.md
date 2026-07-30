@@ -1,6 +1,6 @@
 # ARM64 C++ 镜像本地调试、推送与部署指南
 
-本文以 `workspace/helloworld/main.cpp` 为例，说明完整开发链路：
+本文以 `workspace/examples/helloworld/src/main.cpp` 为例，说明完整开发链路：
 
 如果部署环境不能访问互联网和 Harbor，但 Windows 与 ARM64 服务器局域网互通，请改用
 [无互联网、局域网版开发与部署指南](OFFLINE.md)。
@@ -111,11 +111,13 @@ uestcradar/
 │       ├── README.md
 │       └── OFFLINE.md
 └── workspace/
-    └── helloworld/
-        └── main.cpp
+    └── examples/
+        └── helloworld/
+            └── src/
+                └── main.cpp
 ```
 
-- `workspace/helloworld/main.cpp`：C++ 源码。
+- `workspace/examples/helloworld/src/main.cpp`：C++ 源码。
 - `docker/helloworld/Dockerfile`：编译并封装 ARM64 程序。
 - `docker/helloworld/compose.yaml`：Windows 本地构建和运行配置。
 - `docker/helloworld/build-local.ps1`：只构建镜像、不启动程序的一键脚本。
@@ -163,7 +165,7 @@ $env:HELLOWORLD_IMAGE = $image
 编辑：
 
 ```text
-workspace/helloworld/main.cpp
+workspace/examples/helloworld/src/main.cpp
 ```
 
 当前示例是持续运行程序，每秒打印一次日志。`std::endl` 会刷新标准输出，所以日志能立即显示。

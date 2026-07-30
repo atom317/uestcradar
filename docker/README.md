@@ -8,8 +8,8 @@ ARM64 服务器部署所需的 Docker 配置。示例源码统一放在仓库根
 
 | 示例 | 源码 | 构建配置 | 使用指南 |
 | --- | --- | --- | --- |
-| 标准 C++ Hello World | `workspace/helloworld/` | `docker/helloworld/` | [联网流程](helloworld/README.md) / [无互联网局域网流程](helloworld/OFFLINE.md) |
-| Qt 5.15 + qmake + Qt Core | `workspace/qt5core/` | `docker/qt5core/` | [Qt 5.15 迁移指南](qt5core/README.md) |
+| 标准 C++ Hello World | `workspace/examples/helloworld/` | `docker/helloworld/` | [联网流程](helloworld/README.md) / [无互联网局域网流程](helloworld/OFFLINE.md) |
+| Qt 5.15 + qmake + Qt Core | `workspace/examples/qt5core/` | `docker/qt5core/` | [Qt 5.15 迁移指南](qt5core/README.md) |
 
 ## 最短本地调试命令
 

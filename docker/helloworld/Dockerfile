@@ -11,7 +11,7 @@ RUN unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
-COPY workspace/helloworld/main.cpp ./hello.cpp
+COPY workspace/examples/helloworld/src/main.cpp ./hello.cpp
 
 RUN mkdir -p /out \
     && g++ -std=c++17 -O2 -Wall -Wextra \

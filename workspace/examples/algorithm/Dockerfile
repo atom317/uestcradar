@@ -1,7 +1,5 @@
 # syntax=docker/dockerfile:1
-
 ARG BASE_IMAGE=registry.chengyistudio.com/cxx/ubuntu:24.04
-
 FROM ${BASE_IMAGE} AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -18,17 +16,15 @@ RUN cmake -S sdk -B sdk-build \
     && cmake --build sdk-build --parallel \
     && cmake --install sdk-build
 
-COPY workspace/CMakeLists.txt workspace/worker.cpp ./algorithm/
-RUN cmake -S algorithm -B algorithm-build \
+COPY workspace/examples/algorithm/ ./algorithm/
+RUN cmake -S algorithm/src -B algorithm-build \
        -DCMAKE_BUILD_TYPE=Release \
        -DCMAKE_PREFIX_PATH=/out/sdk \
     && cmake --build algorithm-build --parallel
 
 FROM ${BASE_IMAGE} AS runtime
-
 WORKDIR /app
-COPY --from=builder /src/algorithm-build/worker /app/worker
+COPY --from=builder /src/algorithm-build/algorithm /app/algorithm
 COPY --from=builder /out/sdk/lib/libuestcradar_sdk.so /app/libuestcradar_sdk.so
-
 ENV LD_LIBRARY_PATH=/app
-ENTRYPOINT ["/app/worker"]
+ENTRYPOINT ["/app/algorithm"]

@@ -1,0 +1,30 @@
+services:
+  # 黑盒内部：负责将数据从模拟物理网段传输过来
+  sidecar-alpha:
+    image: registry.chengyistudio.com/cxx/ring-sidecar:0.1.0
+    network_mode: host
+    ipc: shareable
+    environment:
+      - SIDECAR_UCX_ROLE=listen
+      - TELEMETRY_HOST=127.0.0.1 
+
+  # 黑盒内部：模拟物理雷达，持续产生 100Hz 测试波形
+  radar-source:
+    image: registry.chengyistudio.com/cxx/ring-signalsource:latest
+    network_mode: host
+    ipc: service:sidecar-alpha
+    depends_on:
+      - sidecar-alpha
+
+  # 【面向您的唯一接口】：这是数据流的终点，即您的“数据井”
+  sidecar-beta:
+    container_name: sidecar-beta
+    image: registry.chengyistudio.com/cxx/ring-sidecar:0.1.0
+    network_mode: host
+    ipc: shareable
+    environment:
+      - SIDECAR_UCX_ROLE=connect
+      - SIDECAR_UCX_PEER_HOST=127.0.0.1
+      - TELEMETRY_HOST=127.0.0.1 
+    depends_on:
+      - sidecar-alpha

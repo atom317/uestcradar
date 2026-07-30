@@ -32,21 +32,23 @@ docker compose -f docker-compose.infra.yaml up -d
 您的主程序（`main.cpp`）将变得像自然语言一样清晰易懂。以下是使用 SDK 的标准“四步曲”伪代码：
 
 ```cpp
-#include "sdk.h"
+#include <data.h>
+#include <sdk.h>
 #include "my_algorithm.hpp"
 
 int main() {
-    // 1. 接入基座的数据管道
-    io_open();
+    using namespace uestcradar;
+    Input<IQFrame> input;
+    Output<PulseCompressionFrame> output;
 
-    // 2. 无脑拉取测试数据
-    io_read(buffer, size);
-    
-    // 3. 执行纯数学逻辑 (无需关心数据是怎么飞过来的)
-    RadarAlgo::process_fft_and_save(buffer, output_path);
-    
-    // 4. 关闭管道
-    io_close();
+    auto iq = input.read();
+    auto pulse = output.create({
+        .frame_id = iq.metadata.frame_id,
+        .channel_count = iq.metadata.channel_count,
+        .range_bin_count = iq.metadata.samples_per_channel,
+    });
+    process(iq.data, pulse.data);
+    output.write(pulse);
 }
 ```
 

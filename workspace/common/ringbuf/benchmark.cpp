@@ -1,268 +1,318 @@
 #include "ringbuf.hpp"
 
 #include <algorithm>
-#include <cerrno>
+#include <atomic>
 #include <chrono>
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
-#include <cstdlib>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
-#include <limits>
+#include <numeric>
+#include <span>
 #include <string>
-#include <stdexcept>
+#include <string_view>
 #include <thread>
 #include <vector>
 #include <unistd.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
+#include <time.h>
 
 namespace {
 
-struct BlockBenchmarkResult {
-    std::size_t block_size{0};
-    std::uint64_t iterations{0};
-    double elapsed_sec{0.0};
-    double throughput_gib_s{0.0};
-    double ops_per_sec{0.0};
+using Clock = std::chrono::steady_clock;
+constexpr std::size_t kLatencySampleLimit = 1'000'000;
+
+struct Arguments {
+    std::vector<std::size_t> payloads{
+        64, 1024, 4096, 65536, 262144, 1048576};
+    std::vector<std::uint32_t> slots{2, 4, 8, 16, 64};
+    double warmup_seconds{3.0};
+    double duration_seconds{15.0};
+    unsigned repetitions{3};
+    bool json{false};
 };
 
-void verify_zero_copy_wrap(const std::string& name) {
-    RingBuffer* ring = ringbuf_create(name.c_str(), 32);
-    const auto cleanup = [&] {
-        ringbuf_shutdown(ring);
-        ringbuf_close(ring);
-        ringbuf_unlink(name.c_str());
-    };
+struct Shared {
+    std::atomic<bool> ready{false};
+    std::atomic<bool> measure{false};
+    std::atomic<bool> stop{false};
+    std::uint64_t messages{0};
+    std::uint64_t latency_count{0};
+    long double latency_total_ns{0};
+    double consumer_cpu_seconds{0};
+    double p50_ns{0};
+    double p99_ns{0};
+};
 
-    std::span<std::byte> first_write =
-        ringbuf_reserve_write(ring);
-    if (first_write.size() != 32 ||
-        !ringbuf_commit_write(ring, 24)) {
-        cleanup();
-        throw std::runtime_error(
-            "zero-copy initial write reservation failed");
-    }
-    std::span<const std::byte> first_read =
-        ringbuf_peek_read(ring);
-    if (first_read.size() != 24 ||
-        ringbuf_commit_read(ring, 25) ||
-        !ringbuf_commit_read(ring, 20)) {
-        cleanup();
-        throw std::runtime_error(
-            "zero-copy read commit validation failed");
-    }
-
-    std::span<std::byte> tail_write =
-        ringbuf_reserve_write(ring);
-    if (tail_write.size() != 8 ||
-        !ringbuf_commit_write(ring, tail_write.size())) {
-        cleanup();
-        throw std::runtime_error(
-            "zero-copy write crossed the ring tail");
-    }
-    std::span<std::byte> wrapped_write =
-        ringbuf_reserve_write(ring);
-    if (wrapped_write.size() != 20 ||
-        !ringbuf_commit_write(ring, 10)) {
-        cleanup();
-        throw std::runtime_error(
-            "zero-copy wrapped write reservation failed");
-    }
-
-    std::span<const std::byte> tail_read =
-        ringbuf_peek_read(ring);
-    if (tail_read.size() != 12 ||
-        !ringbuf_commit_read(ring, tail_read.size())) {
-        cleanup();
-        throw std::runtime_error(
-            "zero-copy read crossed the ring tail");
-    }
-    std::span<const std::byte> wrapped_read =
-        ringbuf_peek_read(ring);
-    if (wrapped_read.size() != 10 ||
-        !ringbuf_commit_read(ring, wrapped_read.size()) ||
-        !ringbuf_peek_read(ring).empty()) {
-        cleanup();
-        throw std::runtime_error(
-            "zero-copy wrapped read reservation failed");
-    }
-    cleanup();
+std::uint64_t monotonic_ns() {
+    timespec value{};
+    ::clock_gettime(CLOCK_MONOTONIC, &value);
+    return static_cast<std::uint64_t>(value.tv_sec) * 1'000'000'000ULL +
+           static_cast<std::uint64_t>(value.tv_nsec);
 }
 
-// 跑单个 Block Size 的吞吐基准测试
-BlockBenchmarkResult run_block_benchmark(
-    const std::string& name_prefix,
-    std::size_t block_size,
-    std::uint64_t iterations) {
+double process_cpu_seconds() {
+    timespec value{};
+    ::clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &value);
+    return static_cast<double>(value.tv_sec) +
+           static_cast<double>(value.tv_nsec) / 1e9;
+}
 
-    const std::string name = name_prefix + "_" + std::to_string(block_size);
-    constexpr std::size_t kBenchmarkCapacity = 3 * 1024 * 1024 + 123;
-    RingBuffer* ring = ringbuf_create(name.c_str(), kBenchmarkCapacity);
-    if (!ring) {
-        throw std::runtime_error("ringbuf_create failed for " + name);
+std::vector<std::size_t> parse_sizes(std::string_view text) {
+    std::vector<std::size_t> result;
+    std::size_t start = 0;
+    while (start < text.size()) {
+        const std::size_t comma = text.find(',', start);
+        const std::string token{text.substr(
+            start, comma == text.npos ? text.size() - start : comma - start)};
+        result.push_back(std::stoull(token));
+        if (comma == text.npos) break;
+        start = comma + 1;
     }
-    if (ringbuf_capacity(ring) != kBenchmarkCapacity) {
-        throw std::runtime_error("creator observed an invalid capacity");
-    }
+    return result;
+}
 
-    const pid_t consumer_pid = ::fork();
-    if (consumer_pid == -1) {
-        ringbuf_shutdown(ring);
-        ringbuf_close(ring);
-        ringbuf_unlink(name.c_str());
-        throw std::runtime_error("fork failed");
-    }
-
-    // 消费者子进程
-    if (consumer_pid == 0) {
-        ringbuf_close(ring);
-        RingBuffer* consumer = ringbuf_open(name.c_str());
-        if (ringbuf_capacity(consumer) != kBenchmarkCapacity) {
-            ringbuf_close(consumer);
-            ::_exit(1);
+Arguments parse(int argc, char* argv[]) {
+    Arguments result;
+    for (int index = 1; index < argc; ++index) {
+        const std::string_view arg{argv[index]};
+        const auto next = [&]() -> std::string_view {
+            if (++index >= argc) throw std::runtime_error("missing value");
+            return argv[index];
+        };
+        if (arg == "--payload-bytes") {
+            result.payloads = parse_sizes(next());
+        } else if (arg == "--slot-counts") {
+            const auto values = parse_sizes(next());
+            result.slots.clear();
+            for (std::size_t value : values) {
+                result.slots.push_back(static_cast<std::uint32_t>(value));
+            }
+        } else if (arg == "--warmup") {
+            result.warmup_seconds = std::stod(std::string{next()});
+        } else if (arg == "--duration") {
+            result.duration_seconds = std::stod(std::string{next()});
+        } else if (arg == "--repetitions") {
+            result.repetitions =
+                static_cast<unsigned>(std::stoul(std::string{next()}));
+        } else if (arg == "--format") {
+            result.json = next() == "jsonl";
+        } else {
+            throw std::runtime_error(
+                "usage: ringbuf-benchmark [--payload-bytes LIST] "
+                "[--slot-counts LIST] [--warmup SEC] [--duration SEC] "
+                "[--repetitions N] [--format table|jsonl]");
         }
-        std::vector<std::byte> recv_buf(block_size);
-        bool valid = true;
+    }
+    return result;
+}
 
-        for (std::uint64_t i = 0; i < iterations; ++i) {
-            std::size_t read_bytes = 0;
-            while (read_bytes < block_size) {
-                const std::int32_t res = ringbuf_read(
-                    consumer,
-                    recv_buf.data() + read_bytes,
-                    block_size - read_bytes);
-                if (res > 0) {
-                    read_bytes += static_cast<std::size_t>(res);
-                } else if (res < 0 || ringbuf_is_shutdown(consumer)) {
-                    valid = false;
-                    break;
-                } else {
-                    std::this_thread::yield();
+double percentile(std::vector<double>& values, double fraction) {
+    std::sort(values.begin(), values.end());
+    const std::size_t index = std::min(
+        values.size() - 1,
+        static_cast<std::size_t>(
+            std::ceil(fraction * values.size())) - 1);
+    return values[index];
+}
+
+void consumer(
+    const std::string& name,
+    Shared* shared) {
+    RingBuffer* ring = ringbuf_open(name.c_str());
+    std::vector<double> latency_samples;
+    latency_samples.reserve(kLatencySampleLimit);
+    bool measuring = false;
+    double cpu_started = 0;
+    shared->ready.store(true, std::memory_order_release);
+    for (;;) {
+        if (!measuring &&
+            shared->measure.load(std::memory_order_acquire)) {
+            measuring = true;
+            cpu_started = process_cpu_seconds();
+        }
+        RingReadLease lease;
+        const RingResult result = ringbuf_acquire(ring, lease);
+        if (result == RingResult::ok) {
+            if (measuring) {
+                std::uint64_t sent_ns = 0;
+                std::memcpy(
+                    &sent_ns, lease.payload().data(), sizeof(sent_ns));
+                const double latency =
+                    static_cast<double>(monotonic_ns() - sent_ns);
+                ++shared->messages;
+                ++shared->latency_count;
+                shared->latency_total_ns += latency;
+                if (latency_samples.size() < kLatencySampleLimit) {
+                    latency_samples.push_back(latency);
                 }
             }
-            if (!valid) break;
-        }
-
-        ringbuf_close(consumer);
-        ::_exit(valid ? 0 : 1);
-    }
-
-    // 生产者父进程
-    std::vector<std::byte> send_buf(block_size, std::byte{0xAB});
-    bool producer_failed = false;
-
-    const auto started_at = std::chrono::steady_clock::now();
-
-    for (std::uint64_t i = 0; i < iterations; ++i) {
-        std::size_t written_bytes = 0;
-        while (written_bytes < block_size) {
-            const std::int32_t res = ringbuf_write(
-                ring,
-                send_buf.data() + written_bytes,
-                block_size - written_bytes);
-            if (res > 0) {
-                written_bytes += static_cast<std::size_t>(res);
-            } else if (res < 0) {
-                producer_failed = true;
-                break;
-            } else {
-                std::this_thread::yield();
+            if (ringbuf_release(lease) != RingResult::ok) {
+                ::_exit(2);
             }
+            continue;
         }
-        if (producer_failed) break;
-    }
-
-    if (producer_failed) {
-        ringbuf_shutdown(ring);
-    }
-
-    int consumer_status = 0;
-    while (::waitpid(consumer_pid, &consumer_status, 0) == -1) {
-        if (errno != EINTR) {
-            throw std::runtime_error("waitpid failed");
+        if (result != RingResult::would_block) {
+            ::_exit(3);
         }
+        if (shared->stop.load(std::memory_order_acquire) &&
+            ringbuf_occupied_slots(ring) == 0) {
+            break;
+        }
+        std::this_thread::yield();
     }
+    shared->consumer_cpu_seconds =
+        process_cpu_seconds() - cpu_started;
+    if (!latency_samples.empty()) {
+        shared->p50_ns = percentile(latency_samples, 0.50);
+        shared->p99_ns = percentile(latency_samples, 0.99);
+    }
+    ringbuf_close(ring);
+}
 
-    const auto elapsed = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - started_at);
+void produce_until(
+    RingBuffer* ring,
+    std::size_t payload_bytes,
+    Clock::time_point deadline) {
+    std::uint64_t sequence = 0;
+    while (Clock::now() < deadline) {
+        RingWriteLease lease;
+        if (ringbuf_reserve(ring, lease) != RingResult::ok) {
+            std::this_thread::yield();
+            continue;
+        }
+        const std::uint64_t now = monotonic_ns();
+        std::memcpy(lease.payload().data(), &now, sizeof(now));
+        std::memcpy(
+            lease.payload().data() + sizeof(now),
+            &sequence,
+            sizeof(sequence));
+        if (ringbuf_commit(lease, payload_bytes) != RingResult::ok) {
+            throw std::runtime_error("benchmark commit failed");
+        }
+        ++sequence;
+    }
+}
 
+void run_case(
+    std::size_t payload,
+    std::uint32_t slots,
+    const Arguments& arguments,
+    unsigned repetition) {
+    if (payload < 16 || payload > INT32_MAX) {
+        throw std::runtime_error("benchmark payload must be 16..INT32_MAX");
+    }
+    const std::string name =
+        "/uestcradar_slot_bm_" + std::to_string(::getpid()) + "_" +
+        std::to_string(payload) + "_" + std::to_string(slots);
+    RingBuffer* ring =
+        ringbuf_create(name.c_str(), {slots,
+            static_cast<std::uint32_t>(payload), 0xb001, 1});
+    auto* shared = static_cast<Shared*>(::mmap(
+        nullptr, sizeof(Shared), PROT_READ | PROT_WRITE,
+        MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+    if (shared == MAP_FAILED) throw std::runtime_error("mmap failed");
+    ::new (shared) Shared{};
+    const pid_t child = ::fork();
+    if (child == 0) {
+        ringbuf_close(ring);
+        consumer(name, shared);
+        ::_exit(0);
+    }
+    while (!shared->ready.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    produce_until(
+        ring, payload,
+        Clock::now() + std::chrono::duration_cast<Clock::duration>(
+                           std::chrono::duration<double>{
+                               arguments.warmup_seconds}));
+    while (ringbuf_occupied_slots(ring) != 0) {
+        std::this_thread::yield();
+    }
+    const double producer_cpu_started = process_cpu_seconds();
+    const auto started = Clock::now();
+    shared->measure.store(true, std::memory_order_release);
+    produce_until(
+        ring, payload,
+        started + std::chrono::duration_cast<Clock::duration>(
+                      std::chrono::duration<double>{
+                          arguments.duration_seconds}));
+    const auto production_ended = Clock::now();
+    shared->stop.store(true, std::memory_order_release);
+    int status = 0;
+    ::waitpid(child, &status, 0);
+    const double wall =
+        std::chrono::duration<double>(production_ended - started).count();
+    const double producer_cpu =
+        process_cpu_seconds() - producer_cpu_started;
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 ||
+        shared->messages == 0) {
+        throw std::runtime_error("benchmark consumer failed");
+    }
+    const double mib =
+        static_cast<double>(shared->messages) * payload /
+        (1024.0 * 1024.0);
+    const double mean_us =
+        static_cast<double>(
+            shared->latency_total_ns / shared->latency_count) / 1000.0;
+    if (arguments.json) {
+        std::cout
+            << "{\"benchmark\":\"ringbuf-slot\",\"payload_bytes\":"
+            << payload << ",\"slot_count\":" << slots
+            << ",\"repetition\":" << repetition
+            << ",\"messages\":" << shared->messages
+            << ",\"duration_s\":" << wall
+            << ",\"payload_mib_s\":" << mib / wall
+            << ",\"messages_s\":" << shared->messages / wall
+            << ",\"latency_us_mean\":" << mean_us
+            << ",\"latency_us_p50\":" << shared->p50_ns / 1000.0
+            << ",\"latency_us_p99\":" << shared->p99_ns / 1000.0
+            << ",\"producer_cpu_pct\":" << producer_cpu / wall * 100.0
+            << ",\"consumer_cpu_pct\":"
+            << shared->consumer_cpu_seconds / wall * 100.0 << "}\n";
+    } else {
+        std::cout << std::fixed << std::setprecision(2)
+                  << "payload=" << payload << " slots=" << slots
+                  << " rep=" << repetition
+                  << " MiB/s=" << mib / wall
+                  << " msg/s=" << shared->messages / wall
+                  << " mean_us=" << mean_us
+                  << " p50_us=" << shared->p50_ns / 1000.0
+                  << " p99_us=" << shared->p99_ns / 1000.0
+                  << " producer_cpu=" << producer_cpu / wall * 100.0
+                  << "% consumer_cpu="
+                  << shared->consumer_cpu_seconds / wall * 100.0
+                  << "%\n";
+    }
+    shared->~Shared();
+    ::munmap(shared, sizeof(Shared));
     ringbuf_shutdown(ring);
     ringbuf_close(ring);
     ringbuf_unlink(name.c_str());
-
-    if (producer_failed || !WIFEXITED(consumer_status) ||
-        WEXITSTATUS(consumer_status) != 0) {
-        throw std::runtime_error("data integrity / process failure during benchmark");
-    }
-
-    const double total_bytes = static_cast<double>(block_size) * static_cast<double>(iterations);
-    const double total_gib = total_bytes / (1024.0 * 1024.0 * 1024.0);
-    const double sec = elapsed.count();
-
-    BlockBenchmarkResult res;
-    res.block_size = block_size;
-    res.iterations = iterations;
-    res.elapsed_sec = sec;
-    res.throughput_gib_s = total_gib / sec;
-    res.ops_per_sec = static_cast<double>(iterations) / sec;
-    return res;
 }
 
 }  // namespace
 
-int main(int /*argc*/, char* /*argv*/[]) {
+int main(int argc, char* argv[]) {
     try {
-        const std::string name_prefix =
-            "/uestcradar_bm_" + std::to_string(::getpid());
-        verify_zero_copy_wrap(name_prefix + "_zero_copy");
-
-        // 逐步递增的测试块大小列表 (8B ~ 512KB)
-        const std::vector<std::pair<std::size_t, std::uint64_t>> test_cases = {
-            {8,        5'000'000}, // 8 B  (小消息/低延迟测试)
-            {64,       2'000'000}, // 64 B (Cacheline 对齐)
-            {1024,     1'000'000}, // 1 KiB
-            {4096,       500'000}, // 4 KiB (标准页面大小)
-            {65536,       50'000}, // 64 KiB (高吞吐小包)
-            {262144,      15'000}, // 256 KiB
-            {524288,       8'000}  // 512 KiB (接近 RingBuffer 容量)
-        };
-
-        std::cout << "========================================================================================\n";
-        std::cout << "               RingBuffer 内存吞吐速率与 Block Size 递增基准测试 (Sweep)                \n";
-        std::cout << "========================================================================================\n";
-        std::cout << std::left 
-                  << std::setw(12) << "Block Size" 
-                  << std::setw(15) << "Iterations" 
-                  << std::setw(15) << "Elapsed (s)" 
-                  << std::setw(18) << "Throughput (GiB/s)" 
-                  << std::setw(18) << "Throughput (MiB/s)"
-                  << std::setw(15) << "Ops/sec (QPS)" 
-                  << "\n";
-        std::cout << "----------------------------------------------------------------------------------------\n";
-
-        for (const auto& [block_size, iters] : test_cases) {
-            auto result = run_block_benchmark(name_prefix, block_size, iters);
-            
-            std::string block_str;
-            if (block_size < 1024) {
-                block_str = std::to_string(block_size) + " B";
-            } else {
-                block_str = std::to_string(block_size / 1024) + " KiB";
+        const Arguments arguments = parse(argc, argv);
+        for (std::size_t payload : arguments.payloads) {
+            for (std::uint32_t slots : arguments.slots) {
+                for (unsigned repetition = 1;
+                     repetition <= arguments.repetitions;
+                     ++repetition) {
+                    run_case(
+                        payload, slots, arguments, repetition);
+                }
             }
-
-            std::cout << std::left 
-                      << std::setw(12) << block_str
-                      << std::setw(15) << result.iterations
-                      << std::setw(15) << std::fixed << std::setprecision(4) << result.elapsed_sec
-                      << std::setw(18) << std::fixed << std::setprecision(2) << result.throughput_gib_s
-                      << std::setw(18) << std::fixed << std::setprecision(2) << (result.throughput_gib_s * 1024.0)
-                      << std::setw(15) << std::fixed << std::setprecision(0) << result.ops_per_sec
-                      << std::endl;
         }
-        std::cout << "========================================================================================\n";
         return 0;
-
     } catch (const std::exception& error) {
-        std::cerr << "benchmark failed: " << error.what() << '\n';
+        std::cerr << "ringbuf-benchmark: " << error.what() << '\n';
         return 1;
     }
 }

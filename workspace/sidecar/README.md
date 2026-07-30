@@ -147,18 +147,34 @@ workspace/sidecar/
 
 ## 6. 当前启动模型
 
-`sidecar` 不接收模式参数。进程启动后创建 `/upstreambuf` 和
-`/downstreambuf` 两个 SPSC 字节环，建立一个双向 UCX endpoint，注册两个
-共享内存数据区，并在后台启动 Forwarder 和 Telemetry。Forwarder 使用
-credit 协调每次连续传输长度，Payload 的 RingBuffer 游标只在 UCX 完成后
-提交。
+`sidecar` 不接收模式参数。进程启动后创建 upstream 和 downstream 两个
+fixed-slot SPSC 记录环，在后台持续尝试建立双向 UCX endpoint，并立即启动
+Telemetry。Forwarder 使用 credit 协调接收 Slot，网络只搬运 Slot 的有效
+Payload；发送完成后释放源 Slot，接收成功且长度合法后提交目标 Slot。
 
 Compose 为每个节点启动一个 Sidecar 和一个共享 IPC namespace 的实际 worker：
 
 ```bash
-ALPHA_RING_CAPACITY_BYTES=8388608 \
-BETA_RING_CAPACITY_BYTES=16777216 \
-docker compose up --build
+SLOT_COUNT=64 MAX_PAYLOAD_BYTES=262144 \
+docker compose -f workspace/sidecar/tools/compose.e2e-benchmark.yaml \
+  up --build --abort-on-container-exit
 ```
 
-`shm_size` 必须大于两个数据区与两个 4096 字节控制头的总和，建议保留额外余量。`SIDECAR_UCX_ROLE` 选择 listen/connect，`SIDECAR_UCX_DATA_PATH` 选择 functional/strict-rdma，`FORWARDER_MAX_TRANSFER_BYTES` 限制单次连续传输。`SIDECAR_UCX_CONNECT_TIMEOUT_MS` 是单次建连尝试的上限（默认 2000 ms）；端点暂不可用时 Sidecar 保持遥测并在后台重试。
+每个方向通过以下环境变量配置，不新增配置文件：
+
+- `SIDECAR_{UPSTREAM,DOWNSTREAM}_SLOT_COUNT`
+- `SIDECAR_{UPSTREAM,DOWNSTREAM}_MAX_PAYLOAD_BYTES`
+- `SIDECAR_{UPSTREAM,DOWNSTREAM}_TYPE_ID`
+- `SIDECAR_{UPSTREAM,DOWNSTREAM}_TYPE_VERSION`
+- `UESTCRADAR_{UPSTREAM,DOWNSTREAM}_SHM_NAME`
+- `SIDECAR_UCX_ROLE`、`SIDECAR_UCX_{BIND_HOST,PEER_HOST,PORT}`
+- `SIDECAR_UCX_CONNECT_TIMEOUT_MS`、`SIDECAR_UCX_DATA_PATH`
+
+原生 `UCX_TLS` 等 UCX 参数保持原名。`shm_size` 至少应覆盖两个 Ring 的
+`4096 + slot_count × align64(64 + max_payload_bytes)` 之和并留余量。
+端点暂不可用时 Sidecar 保持 Ring 和遥测存活，在后台重试。
+
+端到端 Benchmark 的生产速率可用 `RATE_MIB_S` 限制；非零时按
+`WAVE_PERIOD_SECONDS` 制造波峰波谷。容器分别输出 producer 与 consumer 的
+JSON 指标。Docker Compose 用同一宿主机的 monotonic clock 统计单向延迟；跨
+物理机执行 P50/P99 前必须先使用 PTP 等方式校时。

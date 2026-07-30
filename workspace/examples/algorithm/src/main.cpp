@@ -1,41 +1,57 @@
-#include "sdk.h"
+#include <data.h>
+#include <sdk.h>
+
 #include "my_algorithm.hpp"
-#include <vector>
+
 #include <complex>
 #include <iostream>
+#include <vector>
 
 int main() {
-    // -----------------------------------------------------------------
-    // 步骤 1: 接通网络数据井 (对底层基建透明)
-    // -----------------------------------------------------------------
-    if (io_open() != 0) {
-        std::cerr << "接入雷达数据源失败！\n";
-        return -1;
+    try {
+        using namespace uestcradar;
+
+        Input<IQFrame> input;
+        Output<PulseCompressionFrame> output;
+        std::cout << "成功接入 IQ 数据源，等待数据...\n";
+
+        auto iq = input.read();
+        auto pulse = output.create({
+            .frame_id = iq.metadata.frame_id,
+            .timestamp_unix_ns = iq.metadata.timestamp_unix_ns,
+            .channel_count = iq.metadata.channel_count,
+            .range_bin_count = iq.metadata.samples_per_channel,
+            .pulse_index = 0,
+            .pulses_per_cpi = 1,
+            .range_resolution_m = 1.0,
+        });
+
+        std::vector<std::complex<float>> first_channel;
+        first_channel.reserve(iq.data.columns());
+        for (std::size_t channel = 0;
+             channel < iq.data.rows();
+             ++channel) {
+            for (std::size_t sample = 0;
+                 sample < iq.data.columns();
+                 ++sample) {
+                const auto value = iq.data[channel][sample];
+                pulse.data[channel][sample] = {
+                    static_cast<float>(value.i),
+                    static_cast<float>(value.q),
+                };
+                if (channel == 0) {
+                    first_channel.emplace_back(value.i, value.q);
+                }
+            }
+        }
+        output.write(pulse);
+
+        RadarAlgo::process_fft_and_save(
+            first_channel, "/output/fft_result.pgm");
+    } catch (const std::exception& error) {
+        std::cerr << "算法处理失败：" << error.what() << '\n';
+        return 1;
     }
-    std::cout << "成功接入雷达数据源，等待数据...\n";
-
-    // -----------------------------------------------------------------
-    // 步骤 2: 准备一块内存，准备接一帧雷达数据 (假设帧长 1024)
-    // -----------------------------------------------------------------
-    std::vector<std::complex<float>> frame_data(1024);
-
-    // -----------------------------------------------------------------
-    // 步骤 3: 阻塞读取一帧雷达数据 (无需关心网络、丢包、锁)
-    // -----------------------------------------------------------------
-    int32_t bytes_read = io_read(frame_data.data(), frame_data.size() * sizeof(std::complex<float>));
-    
-    if (bytes_read > 0) {
-        // -------------------------------------------------------------
-        // 步骤 4: 执行您专属的数学算法
-        // -------------------------------------------------------------
-        RadarAlgo::process_fft_and_save(frame_data, "/output/fft_result.pgm");
-    }
-
-    // -----------------------------------------------------------------
-    // 步骤 5: 关闭连接，释放资源
-    // -----------------------------------------------------------------
-    io_close();
     std::cout << "数据处理完毕，程序退出。\n";
-
     return 0;
 }

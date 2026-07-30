@@ -30,7 +30,7 @@ docker compose -f docker-compose.infra.yaml up -d
 
 ## 第二步：编写您的多通道算法
 
-在这个框架下，所有的通信复杂度已被 SDK 的 `io_read` 隐藏。我们引入了 `RadarReader`（负责无脑抽水和解包）和 `ChannelProcessor`（后台独立运算节点）。
+在这个框架下，所有通信复杂度由 `Input<IQFrame>::read()` 隐藏。`RadarReader` 只读取 IQFrame 的二维通道数据，`ChannelProcessor` 在后台线程处理对应通道。
 
 您的主程序（`main.cpp`）将变得像自然语言一样清晰易懂：
 

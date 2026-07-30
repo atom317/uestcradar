@@ -3,7 +3,7 @@ services:
     container_name: sidecar-forwarder-test
     build:
       context: ../../..
-      dockerfile: docker/Dockerfile.sidecar
+      dockerfile: workspace/sidecar/Dockerfile
       target: runtime
       args:
         BASE_IMAGE: ${BASE_IMAGE:-registry.chengyistudio.com/cxx/ubuntu:24.04}
@@ -14,8 +14,14 @@ services:
     init: true
     environment:
       NODE_ID: Forwarder-Test
-      RING_CAPACITY_BYTES: ${RING_CAPACITY_BYTES:-8388608}
-      FORWARDER_MAX_TRANSFER_BYTES: ${FORWARDER_MAX_TRANSFER_BYTES:-262144}
+      SIDECAR_UPSTREAM_SLOT_COUNT: ${SLOT_COUNT:-64}
+      SIDECAR_UPSTREAM_MAX_PAYLOAD_BYTES: ${MAX_PAYLOAD_BYTES:-262144}
+      SIDECAR_UPSTREAM_TYPE_ID: "1"
+      SIDECAR_UPSTREAM_TYPE_VERSION: "1"
+      SIDECAR_DOWNSTREAM_SLOT_COUNT: ${SLOT_COUNT:-64}
+      SIDECAR_DOWNSTREAM_MAX_PAYLOAD_BYTES: ${MAX_PAYLOAD_BYTES:-262144}
+      SIDECAR_DOWNSTREAM_TYPE_ID: "1"
+      SIDECAR_DOWNSTREAM_TYPE_VERSION: "1"
       SIDECAR_UCX_ROLE: listen
       SIDECAR_UCX_BIND_HOST: 0.0.0.0
       SIDECAR_UCX_PORT: ${SIDECAR_UCX_PORT:-13337}
@@ -31,7 +37,8 @@ services:
     container_name: worker-forwarder-test
     build:
       context: ../../..
-      dockerfile: docker/Dockerfile.worker
+      dockerfile: workspace/sidecar/Dockerfile
+      target: e2e-benchmark
       args:
         BASE_IMAGE: ${BASE_IMAGE:-registry.chengyistudio.com/cxx/ubuntu:24.04}
     image: ${WORKER_IMAGE:-uestcradar-worker:forwarder-test}
@@ -39,7 +46,15 @@ services:
     ipc: service:sidecar-test
     init: true
     environment:
-      WORKER_BLOCK_BYTES: ${WORKER_BLOCK_BYTES:-262144}
+      UESTCRADAR_UPSTREAM_SHM_NAME: /uestcradar_upstream
+      UESTCRADAR_DOWNSTREAM_SHM_NAME: /uestcradar_downstream
+    command:
+      - --mode
+      - producer
+      - --payload-bytes
+      - ${PAYLOAD_BYTES:-65536}
+      - --duration-seconds
+      - ${DURATION_SECONDS:-10}
     depends_on:
       - sidecar-test
 

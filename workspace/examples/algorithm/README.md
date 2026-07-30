@@ -2,8 +2,17 @@
 
 欢迎！本目录是雷达**算法工程师**专用的开发模板。
 
-通过底层的零拷贝技术和分布式网关，我们已经将复杂的网络通信、内存管理、背压阻塞全部封装成了“黑盒”。
-对于算法开发者而言，世界上只有一个东西：**“一口源源不断涌出测试数据的雷达数据井”**。
+通过底层的零拷贝技术和分布式网关，我们已经将复杂的网络通信、内存管理、背压阻塞全部封装成了“黑盒”。对于算法开发者而言，世界上只有一个东西：**“一口源源不断涌出测试数据的雷达数据井”**。
+
+## 开发全流程概览
+
+```mermaid
+graph TD
+    A[第一步: 启动算法开发基座] --> B[第二步: 编写您的算法]
+    B --> C[第三步: 算法构建]
+    C --> D[第四步: 运行与调试]
+    D --> E[第五步: 发布镜像至私有源]
+```
 
 ## 第一步：一键启动“算法开发基座”
 
@@ -43,25 +52,46 @@ int main() {
 
 请直接打开本目录 `src/` 下的 `main.cpp` 查看完整源码，它将作为您的开发模板。
 
-## 第三步：打包并“热插拔”您的算法
+## 第三步：算法构建
 
 写好算法后，使用本目录极简的 `Dockerfile` 编译出您的算法容器。
 （得益于底层的 `algo-base`，您只需要在这个目录下直接执行构建即可，极其快速！）
+
 ```bash
 docker build -t my-radar-algorithm:dev .
 ```
 
-最后，带上 `--ipc container:sidecar-beta` 这把钥匙，将您的算法像插件一样挂载到基座上运行：
+## 第四步：运行与调试
+
+您可以带上 `--ipc container:sidecar-beta` 这把钥匙，将您的算法像插件一样挂载到基座上运行。我们提供了两种运行模式：
+
+**模式 A：直接运行算法**
+如果您确认代码无误，希望让它在后台默默跑完并输出结果文件，请明确指定 `--entrypoint` 为算法主程序：
 ```bash
-docker run -d \
+docker run -d --rm \
   --name my-algorithm \
   --network host \
   --ipc container:sidecar-beta \
   -v $(pwd)/output:/output \
+  --entrypoint /app/algorithm \
   my-radar-algorithm:dev
 ```
+运行结束后，在本地的 `output` 文件夹查看 `fft_result.pgm` 的频谱结果，完成算法闭环验证。
 
-## 第四步：发布镜像至私有源 (用于生产部署)
+**模式 B：进入容器交互式调试**
+如果您的算法抛出了异常，或者希望像在本地一样使用 `gdb` 或修改代码，请将 `--entrypoint` 覆盖为 `/bin/bash` 并开启交互终端（`-it`）：
+```bash
+docker run -it --rm \
+  --name my-algorithm-debug \
+  --network host \
+  --ipc container:sidecar-beta \
+  -v $(pwd)/output:/output \
+  --entrypoint /bin/bash \
+  my-radar-algorithm:dev
+```
+进入容器后，由于底层自带了完整的 C++ 编译工具链，您可以手动执行 `./algorithm` 观察报错输出。甚至可以将本机代码目录挂载进去当场修改、当场重新编译，无需反复构建镜像，极大地提升调试效率！
+
+## 第五步：发布镜像至私有源 (用于生产部署)
 
 当您的算法经过本地验证后，您可以将其推送到私有仓库，从而将算法部署到真实的物理雷达基站或云端集群中。
 
@@ -77,4 +107,3 @@ docker push registry.chengyistudio.com/cxx/my-radar-algorithm:v1.0.0
 ```
 
 至此，您的核心算法就已经成功发布，可以脱离开发环境独立运行了！
-运行结束后，在本地的 `output` 文件夹查看 `fft_result.pgm` 的频谱结果，完成算法闭环验证！

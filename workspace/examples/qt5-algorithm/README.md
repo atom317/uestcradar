@@ -23,7 +23,7 @@ graph TD
 请直接使用本目录为您准备好的 `docker-compose.infra.yaml` 启动基座：
 
 ```bash
-docker compose -f docker-compose.infra.yaml up -d --force-recreate
+ docker-compose -f docker-compose.infra.yaml up -d --force-recreate --pull always
 ```
 
 启动成功后，水管已经接通，模拟数据已经堵在 `sidecar-beta` 的内存中，等待您的算法提取。

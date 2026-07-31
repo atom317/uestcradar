@@ -5,7 +5,7 @@ services:
       dockerfile: workspace/sidecar/Dockerfile
       target: runtime
       args:
-        BASE_IMAGE: ${BASE_IMAGE:-registry.chengyistudio.com/cxx/ubuntu:24.04}
+        BASE_IMAGE: ${BASE_IMAGE:-registry.chengyistudio.com/cxx/algo-base:latest}
     image: ${SIDECAR_IMAGE:-uestcradar-sidecar:slot-e2e}
     network_mode: host
     ipc: shareable
@@ -30,6 +30,12 @@ services:
       TELEMETRY_HOST: 127.0.0.1
 
   sidecar-b:
+    build:
+      context: ../../..
+      dockerfile: workspace/sidecar/Dockerfile
+      target: runtime
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-registry.chengyistudio.com/cxx/algo-base:latest}
     image: ${SIDECAR_IMAGE:-uestcradar-sidecar:slot-e2e}
     network_mode: host
     ipc: shareable
@@ -38,7 +44,7 @@ services:
     environment:
       NODE_ID: benchmark-b
       SIDECAR_UCX_ROLE: connect
-      SIDECAR_UCX_PEER_HOST: 127.0.0.1
+      SIDECAR_UCX_PEER_HOST: ${PEER_HOST:-127.0.0.1}
       SIDECAR_UCX_PORT: ${SIDECAR_UCX_PORT:-13337}
       SIDECAR_UCX_CONNECT_TIMEOUT_MS: "1000"
       SIDECAR_UCX_DATA_PATH: ${SIDECAR_UCX_DATA_PATH:-functional}
@@ -61,7 +67,7 @@ services:
       dockerfile: workspace/sidecar/Dockerfile
       target: e2e-benchmark
       args:
-        BASE_IMAGE: ${BASE_IMAGE:-registry.chengyistudio.com/cxx/ubuntu:24.04}
+        BASE_IMAGE: ${BASE_IMAGE:-registry.chengyistudio.com/cxx/algo-base:latest}
     image: ${E2E_IMAGE:-uestcradar-e2e-benchmark:slot}
     network_mode: host
     ipc: service:sidecar-a
@@ -84,6 +90,12 @@ services:
       - worker-b
 
   worker-b:
+    build:
+      context: ../../..
+      dockerfile: workspace/sidecar/Dockerfile
+      target: e2e-benchmark
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-registry.chengyistudio.com/cxx/algo-base:latest}
     image: ${E2E_IMAGE:-uestcradar-e2e-benchmark:slot}
     network_mode: host
     ipc: service:sidecar-b

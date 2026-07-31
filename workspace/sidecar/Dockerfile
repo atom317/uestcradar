@@ -5,12 +5,13 @@ ARG BASE_IMAGE=registry.chengyistudio.com/cxx/ubuntu:24.04
 FROM ${BASE_IMAGE} AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
-RUN unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy \
+RUN which g++ >/dev/null 2>&1 && which cmake >/dev/null 2>&1 && which ninja >/dev/null 2>&1 || ( \
+    unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
        cmake g++ libprotobuf-dev libucx-dev ninja-build pkg-config \
        protobuf-compiler \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* )
 
 WORKDIR /src
 COPY workspace/common/ringbuf/ ./common/ringbuf/
@@ -37,11 +38,12 @@ RUN mkdir -p /out \
 FROM ${BASE_IMAGE} AS network-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
-RUN unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy \
+RUN which g++ >/dev/null 2>&1 && which cmake >/dev/null 2>&1 && which ninja >/dev/null 2>&1 || ( \
+    unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
        cmake g++ libucx-dev ninja-build pkg-config \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* )
 
 WORKDIR /src/sidecar
 COPY workspace/sidecar/network/ ./network/

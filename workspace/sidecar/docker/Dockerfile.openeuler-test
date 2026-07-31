@@ -1,29 +1,10 @@
 ARG OPENEULER_BASE=openeuler/openeuler:20.03-lts-sp4
+ARG OPENEULER_BUILD_BASE=registry.chengyistudio.com/cxx/sidecar:openeuler-rdma35-build-base-arm64
 
-FROM ${OPENEULER_BASE} AS build
+FROM ${OPENEULER_BUILD_BASE} AS build
 
 ARG UCX_VERSION=1.16.0
 ARG UCX_SHA256=f73770d3b583c91aba5fb07557e655ead0786e057018bfe42f0ebe8716e9d28c
-
-RUN test "$(uname -m)" = "aarch64" \
-    && dnf install -y \
-      autoconf \
-      automake \
-      ca-certificates \
-      cmake \
-      gcc-toolset-10-gcc \
-      gcc-toolset-10-gcc-c++ \
-      libnl3-devel \
-      libtool \
-      make \
-      ninja-build \
-      numactl-devel \
-      pkgconf-pkg-config \
-      protobuf-compiler \
-      protobuf-devel \
-      rdma-core-35.0-5.oe2003sp4 \
-      rdma-core-devel-35.0-5.oe2003sp4 \
-    && dnf clean all
 
 ENV TOOLSET_ROOT=/opt/openEuler/gcc-toolset-10/root/usr
 ENV PATH=/opt/openEuler/gcc-toolset-10/root/usr/bin:/opt/ucx/bin:${PATH}

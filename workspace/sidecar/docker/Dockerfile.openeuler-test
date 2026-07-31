@@ -1,5 +1,5 @@
 ARG OPENEULER_BASE=openeuler/openeuler:20.03-lts-sp4
-ARG OPENEULER_BUILD_BASE=registry.chengyistudio.com/cxx/sidecar:openeuler-rdma35-build-base-arm64
+ARG OPENEULER_BUILD_BASE=registry.chengyistudio.com/cxx/sidecar@sha256:1fe34d35fd560184614694e1f5b6fff9de1a06d9edba497d20d89acebcbcbfc8
 
 FROM ${OPENEULER_BUILD_BASE} AS build
 

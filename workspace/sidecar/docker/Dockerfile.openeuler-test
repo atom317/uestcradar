@@ -1,0 +1,84 @@
+ARG OPENEULER_BASE=openeuler/openeuler:20.03-lts-sp4
+
+FROM ${OPENEULER_BASE} AS build
+
+ARG UCX_VERSION=1.16.0
+ARG UCX_SHA256=f73770d3b583c91aba5fb07557e655ead0786e057018bfe42f0ebe8716e9d28c
+
+RUN test "$(uname -m)" = "aarch64" \
+    && dnf install -y \
+      autoconf \
+      automake \
+      ca-certificates \
+      cmake \
+      gcc-toolset-10-gcc \
+      gcc-toolset-10-gcc-c++ \
+      libnl3-devel \
+      libtool \
+      make \
+      ninja-build \
+      numactl-devel \
+      pkgconf-pkg-config \
+      protobuf-compiler \
+      protobuf-devel \
+      rdma-core-35.0-5.oe2003sp4 \
+      rdma-core-devel-35.0-5.oe2003sp4 \
+    && dnf clean all
+
+ENV TOOLSET_ROOT=/opt/openEuler/gcc-toolset-10/root/usr
+ENV PATH=/opt/openEuler/gcc-toolset-10/root/usr/bin:/opt/ucx/bin:${PATH}
+ENV LD_LIBRARY_PATH=/opt/openEuler/gcc-toolset-10/root/usr/lib64:/opt/ucx/lib
+ENV PKG_CONFIG_PATH=/opt/ucx/lib/pkgconfig
+
+WORKDIR /tmp
+ADD https://github.com/openucx/ucx/releases/download/v1.16.0/ucx-1.16.0.tar.gz ./ucx-1.16.0.tar.gz
+ARG BUILD_JOBS=2
+RUN echo "${UCX_SHA256}  ucx-${UCX_VERSION}.tar.gz" | sha256sum -c - \
+    && tar -xzf "ucx-${UCX_VERSION}.tar.gz" \
+    && cd "ucx-${UCX_VERSION}" \
+    && CC="${TOOLSET_ROOT}/bin/gcc" \
+       CXX="${TOOLSET_ROOT}/bin/g++" \
+       ./configure \
+         --prefix=/opt/ucx \
+         --with-verbs \
+         --with-rdmacm \
+         --without-cuda \
+         --without-rocm \
+         --without-java \
+    && make -j"${BUILD_JOBS}" \
+    && make install \
+    && rm -rf "/tmp/ucx-${UCX_VERSION}" "/tmp/ucx-${UCX_VERSION}.tar.gz"
+
+WORKDIR /src
+COPY workspace/common/ringbuf/ ./workspace/common/ringbuf/
+COPY workspace/proto/telemetry.proto ./workspace/proto/telemetry.proto
+COPY workspace/sidecar/ ./workspace/sidecar/
+
+RUN cmake -S workspace/sidecar -B sidecar-build -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_CXX_COMPILER="${TOOLSET_ROOT}/bin/g++" \
+      -DBUILD_TESTING=OFF \
+    && cmake --build sidecar-build --target sidecar --parallel "${BUILD_JOBS}"
+
+FROM ${OPENEULER_BASE} AS runtime
+
+RUN test "$(uname -m)" = "aarch64" \
+    && dnf install -y \
+      ca-certificates \
+      gcc-toolset-10-libstdc++ \
+      rdma-core-35.0-5.oe2003sp4 \
+    && dnf clean all \
+    && rpm -q rdma-core-35.0-5.oe2003sp4 \
+    && test -f /usr/lib64/libibverbs/libhns-rdmav34.so
+
+ENV PATH=/opt/ucx/bin:${PATH}
+ENV LD_LIBRARY_PATH=/opt/ucx/lib:/opt/openEuler/gcc-toolset-10/root/usr/lib64
+
+WORKDIR /app
+COPY --from=build /opt/ucx/ /opt/ucx/
+COPY --from=build /src/sidecar-build/sidecar /app/sidecar
+
+RUN ldd /app/sidecar \
+    && ucx_info -v
+
+ENTRYPOINT ["/app/sidecar"]

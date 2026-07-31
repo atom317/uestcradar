@@ -1,9 +1,8 @@
-CYCOMM_SDK_1.0 {
+CYCOMM_SDK_3.0 {
     global:
-        io_open;
-        io_read;
-        io_write;
-        io_close;
+        _ZN10uestcradar6detail*;
+        _ZN10uestcradar5Input*;
+        _ZN10uestcradar6Output*;
     local:
         *;
 };

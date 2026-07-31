@@ -1,6 +1,5 @@
 #include "ringbuf.hpp"
 
-#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -20,18 +19,43 @@ namespace {
     throw std::system_error(errno, std::generic_category(), operation);
 }
 
-std::size_t checked_mapping_size(std::size_t capacity_bytes) {
-    if (capacity_bytes == 0 ||
-        capacity_bytes >
-            std::numeric_limits<std::size_t>::max() - kRingHeaderSize) {
-        throw std::invalid_argument("ring capacity is out of range");
+std::size_t align_up(std::size_t value, std::size_t alignment) {
+    if (value > std::numeric_limits<std::size_t>::max() -
+                    (alignment - 1)) {
+        throw std::invalid_argument("ring slot size overflows");
     }
-    const std::size_t mapping_size = kRingHeaderSize + capacity_bytes;
+    return (value + alignment - 1) & ~(alignment - 1);
+}
+
+struct Layout {
+    std::size_t stride;
+    std::size_t mapping_size;
+};
+
+Layout checked_layout(const RingBufferConfig& config) {
+    if (config.slot_count < 2 ||
+        config.max_payload_bytes == 0 ||
+        config.max_payload_bytes >
+            static_cast<std::uint32_t>(
+                std::numeric_limits<std::int32_t>::max()) ||
+        config.type_id == 0 || config.type_version == 0) {
+        throw std::invalid_argument("invalid fixed-slot ring configuration");
+    }
+    const std::size_t stride = align_up(
+        kSlotHeaderSize + config.max_payload_bytes,
+        kSlotHeaderSize);
+    if (stride >
+        (std::numeric_limits<std::size_t>::max() - kRingHeaderSize) /
+            config.slot_count) {
+        throw std::invalid_argument("ring mapping size overflows");
+    }
+    const std::size_t mapping_size =
+        kRingHeaderSize + stride * config.slot_count;
     if (mapping_size >
         static_cast<std::size_t>(std::numeric_limits<off_t>::max())) {
         throw std::invalid_argument("ring mapping is too large");
     }
-    return mapping_size;
+    return {stride, mapping_size};
 }
 
 void* map_ring(int fd, std::size_t mapping_size) {
@@ -61,27 +85,104 @@ RingBuffer* make_handle(void* address, std::size_t mapping_size) {
     }
 }
 
+RingSlotHeader* slot_header(
+    RingBuffer* ring,
+    std::uint64_t position) noexcept {
+    const std::size_t index =
+        static_cast<std::size_t>(position % ring->header->slot_count);
+    return reinterpret_cast<RingSlotHeader*>(
+        ring->slots + index * ring->header->slot_stride);
+}
+
+std::byte* slot_payload(RingSlotHeader* slot) noexcept {
+    return reinterpret_cast<std::byte*>(slot) + kSlotHeaderSize;
+}
+
+const std::byte* slot_payload(const RingSlotHeader* slot) noexcept {
+    return reinterpret_cast<const std::byte*>(slot) + kSlotHeaderSize;
+}
+
 }  // namespace
+
+void RingWriteLease::reset() noexcept {
+    ring_ = nullptr;
+    position_ = 0;
+    payload_ = nullptr;
+    capacity_ = 0;
+}
+
+RingWriteLease::RingWriteLease(RingWriteLease&& other) noexcept {
+    *this = std::move(other);
+}
+
+RingWriteLease& RingWriteLease::operator=(
+    RingWriteLease&& other) noexcept {
+    if (this != &other) {
+        ringbuf_cancel(*this);
+        ring_ = other.ring_;
+        position_ = other.position_;
+        payload_ = other.payload_;
+        capacity_ = other.capacity_;
+        other.reset();
+    }
+    return *this;
+}
+
+std::span<std::byte> RingWriteLease::payload() const noexcept {
+    return {payload_, capacity_};
+}
+
+bool RingWriteLease::active() const noexcept {
+    return ring_ != nullptr;
+}
+
+void RingReadLease::reset() noexcept {
+    ring_ = nullptr;
+    position_ = 0;
+    payload_ = nullptr;
+    length_ = 0;
+}
+
+RingReadLease::RingReadLease(RingReadLease&& other) noexcept {
+    *this = std::move(other);
+}
+
+RingReadLease& RingReadLease::operator=(
+    RingReadLease&& other) noexcept {
+    if (this != &other) {
+        ring_ = other.ring_;
+        position_ = other.position_;
+        payload_ = other.payload_;
+        length_ = other.length_;
+        other.reset();
+    }
+    return *this;
+}
+
+std::span<const std::byte> RingReadLease::payload() const noexcept {
+    return {payload_, length_};
+}
+
+bool RingReadLease::active() const noexcept {
+    return ring_ != nullptr;
+}
 
 RingBuffer* ringbuf_create(
     const char* name,
-    std::size_t capacity_bytes) {
+    const RingBufferConfig& config) {
     if (name == nullptr || name[0] == '\0') {
         throw std::invalid_argument("ring name must not be empty");
     }
-    const std::size_t mapping_size =
-        checked_mapping_size(capacity_bytes);
+    const Layout layout = checked_layout(config);
 
     if (::shm_unlink(name) == -1 && errno != ENOENT) {
         throw_system_error("shm_unlink");
     }
-
     const int fd = ::shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0666);
     if (fd == -1) {
         throw_system_error("shm_open(create)");
     }
-
-    if (::ftruncate(fd, static_cast<off_t>(mapping_size)) == -1) {
+    if (::ftruncate(fd, static_cast<off_t>(layout.mapping_size)) == -1) {
         const int saved_errno = errno;
         ::close(fd);
         ::shm_unlink(name);
@@ -91,7 +192,7 @@ RingBuffer* ringbuf_create(
 
     void* address = nullptr;
     try {
-        address = map_ring(fd, mapping_size);
+        address = map_ring(fd, layout.mapping_size);
     } catch (...) {
         ::close(fd);
         ::shm_unlink(name);
@@ -100,27 +201,28 @@ RingBuffer* ringbuf_create(
     ::close(fd);
 
     auto* header = ::new (address) RingBufferHeader{};
-    header->capacity_bytes = capacity_bytes;
+    header->slot_count = config.slot_count;
+    header->slot_stride = layout.stride;
+    header->max_payload_bytes = config.max_payload_bytes;
+    header->type_id = config.type_id;
+    header->type_version = config.type_version;
     header->magic.store(kRingMagic, std::memory_order_release);
-    return make_handle(address, mapping_size);
+    return make_handle(address, layout.mapping_size);
 }
 
 RingBuffer* ringbuf_open(const char* name) {
     if (name == nullptr || name[0] == '\0') {
         throw std::invalid_argument("ring name must not be empty");
     }
-
     for (;;) {
         const int fd = ::shm_open(name, O_RDWR, 0);
         if (fd == -1) {
             if (errno == ENOENT) {
-                std::this_thread::sleep_for(
-                    std::chrono::milliseconds(10));
+                std::this_thread::sleep_for(std::chrono::milliseconds{10});
                 continue;
             }
             throw_system_error("shm_open(open)");
         }
-
         struct stat status {};
         if (::fstat(fd, &status) == -1) {
             const int saved_errno = errno;
@@ -128,15 +230,10 @@ RingBuffer* ringbuf_open(const char* name) {
             errno = saved_errno;
             throw_system_error("fstat");
         }
-        if (status.st_size < static_cast<off_t>(kRingHeaderSize) ||
-            static_cast<std::uintmax_t>(status.st_size) >
-                std::numeric_limits<std::size_t>::max()) {
+        if (status.st_size < static_cast<off_t>(kRingHeaderSize)) {
             ::close(fd);
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(10));
-            continue;
+            throw std::runtime_error("ring mapping is shorter than header");
         }
-
         const std::size_t mapping_size =
             static_cast<std::size_t>(status.st_size);
         void* address = nullptr;
@@ -151,241 +248,233 @@ RingBuffer* ringbuf_open(const char* name) {
         auto* header = static_cast<RingBufferHeader*>(address);
         while (header->magic.load(std::memory_order_acquire) !=
                kRingMagic) {
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(1));
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
         }
-
-        bool valid = header->abi_version == kRingAbiVersion &&
-                     header->header_size == kRingHeaderSize &&
-                     header->capacity_bytes > 0;
+        bool valid =
+            header->abi_version == kRingAbiVersion &&
+            header->header_size == kRingHeaderSize &&
+            header->slot_header_size == kSlotHeaderSize &&
+            header->slot_count >= 2 &&
+            header->max_payload_bytes > 0 &&
+            header->max_payload_bytes <=
+                static_cast<std::uint64_t>(
+                    std::numeric_limits<std::int32_t>::max()) &&
+            header->type_id != 0 && header->type_version != 0;
         if (valid) {
-            valid = header->capacity_bytes ==
-                    mapping_size - kRingHeaderSize;
+            const std::uint64_t expected_stride =
+                (kSlotHeaderSize + header->max_payload_bytes +
+                 kSlotHeaderSize - 1) &
+                ~(static_cast<std::uint64_t>(kSlotHeaderSize) - 1);
+            valid =
+                header->slot_stride == expected_stride &&
+                expected_stride <=
+                    (std::numeric_limits<std::size_t>::max() -
+                     kRingHeaderSize) /
+                        header->slot_count &&
+                mapping_size ==
+                    kRingHeaderSize +
+                        static_cast<std::size_t>(expected_stride) *
+                            header->slot_count;
         }
         if (!valid) {
             ::munmap(address, mapping_size);
-            errno = EPROTO;
-            throw_system_error("ringbuf ABI");
+            throw std::runtime_error("ringbuf ABI mismatch");
         }
         return make_handle(address, mapping_size);
     }
+}
+
+RingResult ringbuf_reserve(
+    RingBuffer* ring,
+    RingWriteLease& lease) noexcept {
+    if (lease.active() || ring == nullptr || ring->header == nullptr) {
+        return RingResult::invalid_argument;
+    }
+    if (ringbuf_is_shutdown(ring)) {
+        return RingResult::shutdown;
+    }
+    const std::uint64_t write =
+        ring->header->write_position.load(std::memory_order_relaxed);
+    const std::uint64_t read =
+        ring->header->read_position.load(std::memory_order_acquire);
+    if (write < read || write - read > ring->header->slot_count) {
+        return RingResult::corrupt;
+    }
+    if (write - read == ring->header->slot_count) {
+        return RingResult::would_block;
+    }
+    RingSlotHeader* slot = slot_header(ring, write);
+    lease.ring_ = ring;
+    lease.position_ = write;
+    lease.payload_ = slot_payload(slot);
+    lease.capacity_ =
+        static_cast<std::size_t>(ring->header->max_payload_bytes);
+    return RingResult::ok;
+}
+
+RingResult ringbuf_commit(
+    RingWriteLease& lease,
+    std::size_t payload_length) noexcept {
+    if (!lease.active() || payload_length == 0 ||
+        payload_length > lease.capacity_) {
+        return RingResult::invalid_argument;
+    }
+    RingBuffer* ring = lease.ring_;
+    if (ringbuf_is_shutdown(ring)) {
+        return RingResult::shutdown;
+    }
+    const std::uint64_t write =
+        ring->header->write_position.load(std::memory_order_relaxed);
+    if (write != lease.position_) {
+        return RingResult::corrupt;
+    }
+    slot_header(ring, write)->payload_length =
+        static_cast<std::uint32_t>(payload_length);
+    ring->header->write_position.store(write + 1, std::memory_order_release);
+    lease.reset();
+    return RingResult::ok;
+}
+
+void ringbuf_cancel(RingWriteLease& lease) noexcept {
+    lease.reset();
+}
+
+RingResult ringbuf_acquire(
+    RingBuffer* ring,
+    RingReadLease& lease) noexcept {
+    if (lease.active() || ring == nullptr || ring->header == nullptr) {
+        return RingResult::invalid_argument;
+    }
+    const std::uint64_t read =
+        ring->header->read_position.load(std::memory_order_relaxed);
+    const std::uint64_t write =
+        ring->header->write_position.load(std::memory_order_acquire);
+    if (write < read || write - read > ring->header->slot_count) {
+        return RingResult::corrupt;
+    }
+    if (write == read) {
+        return ringbuf_is_shutdown(ring)
+                   ? RingResult::shutdown
+                   : RingResult::would_block;
+    }
+    const RingSlotHeader* slot = slot_header(ring, read);
+    const std::size_t length = slot->payload_length;
+    if (length == 0 || length > ring->header->max_payload_bytes) {
+        return RingResult::corrupt;
+    }
+    lease.ring_ = ring;
+    lease.position_ = read;
+    lease.payload_ = slot_payload(slot);
+    lease.length_ = length;
+    return RingResult::ok;
+}
+
+RingResult ringbuf_release(RingReadLease& lease) noexcept {
+    if (!lease.active()) {
+        return RingResult::invalid_argument;
+    }
+    RingBuffer* ring = lease.ring_;
+    const std::uint64_t read =
+        ring->header->read_position.load(std::memory_order_relaxed);
+    if (read != lease.position_) {
+        return RingResult::corrupt;
+    }
+    ring->header->read_position.store(read + 1, std::memory_order_release);
+    lease.reset();
+    return RingResult::ok;
 }
 
 std::int32_t ringbuf_write(
     RingBuffer* ring,
     const void* data,
     std::size_t len) {
-    if (ring == nullptr || ring->header == nullptr ||
-        data == nullptr ||
+    if (data == nullptr || len == 0 ||
         len > static_cast<std::size_t>(
                   std::numeric_limits<std::int32_t>::max())) {
-        return -1;
+        return -EINVAL;
     }
-    if (len == 0 || ringbuf_is_shutdown(ring)) {
+    RingWriteLease lease;
+    const RingResult result = ringbuf_reserve(ring, lease);
+    if (result == RingResult::would_block ||
+        result == RingResult::shutdown) {
         return 0;
     }
-
-    const std::size_t capacity = ringbuf_capacity(ring);
-    const std::uint64_t write =
-        ring->header->write_position.load(std::memory_order_relaxed);
-    const std::uint64_t read =
-        ring->header->read_position.load(std::memory_order_acquire);
-    if (write < read || write - read > capacity) {
-        return -1;
+    if (result != RingResult::ok) {
+        return -EPROTO;
     }
-
-    const std::size_t available =
-        capacity - static_cast<std::size_t>(write - read);
-    const std::size_t write_size = std::min(len, available);
-    if (write_size == 0) {
-        return 0;
+    if (len > lease.payload().size()) {
+        return -EMSGSIZE;
     }
-
-    const auto* source = static_cast<const std::byte*>(data);
-    const std::size_t position = write % capacity;
-    const std::size_t first_size =
-        std::min(write_size, capacity - position);
-    std::memcpy(ring->data + position, source, first_size);
-    std::memcpy(
-        ring->data,
-        source + first_size,
-        write_size - first_size);
-
-    ring->header->write_position.store(
-        write + write_size,
-        std::memory_order_release);
-    return static_cast<std::int32_t>(write_size);
+    std::memcpy(lease.payload().data(), data, len);
+    return ringbuf_commit(lease, len) == RingResult::ok
+               ? static_cast<std::int32_t>(len)
+               : -EPROTO;
 }
 
 std::int32_t ringbuf_read(
     RingBuffer* ring,
     void* data,
-    std::size_t len) {
-    if (ring == nullptr || ring->header == nullptr ||
-        data == nullptr ||
-        len > static_cast<std::size_t>(
-                  std::numeric_limits<std::int32_t>::max())) {
-        return -1;
+    std::size_t capacity) {
+    if (data == nullptr || capacity == 0) {
+        return -EINVAL;
     }
-    if (len == 0) {
+    RingReadLease lease;
+    const RingResult result = ringbuf_acquire(ring, lease);
+    if (result == RingResult::would_block ||
+        result == RingResult::shutdown) {
         return 0;
     }
-
-    const std::size_t capacity = ringbuf_capacity(ring);
-    const std::uint64_t read =
-        ring->header->read_position.load(std::memory_order_relaxed);
-    const std::uint64_t write =
-        ring->header->write_position.load(std::memory_order_acquire);
-    if (write < read || write - read > capacity) {
-        return -1;
+    if (result != RingResult::ok) {
+        return -EPROTO;
     }
-    const std::size_t read_size =
-        std::min(len, static_cast<std::size_t>(write - read));
-    if (read_size == 0) {
-        return 0;
+    if (lease.payload().size() > capacity) {
+        return -EMSGSIZE;
     }
-
-    const std::size_t position = read % capacity;
-    const std::size_t first_size =
-        std::min(read_size, capacity - position);
-    std::memcpy(data, ring->data + position, first_size);
-    std::memcpy(
-        static_cast<std::byte*>(data) + first_size,
-        ring->data,
-        read_size - first_size);
-
-    ring->header->read_position.store(
-        read + read_size,
-        std::memory_order_release);
-    return static_cast<std::int32_t>(read_size);
+    std::memcpy(data, lease.payload().data(), lease.payload().size());
+    const std::size_t length = lease.payload().size();
+    return ringbuf_release(lease) == RingResult::ok
+               ? static_cast<std::int32_t>(length)
+               : -EPROTO;
 }
 
-std::span<const std::byte> ringbuf_peek_read(
-    RingBuffer* ring) noexcept {
-    if (ring == nullptr || ring->header == nullptr ||
-        ring->data == nullptr) {
-        return {};
-    }
-
-    const std::size_t capacity = ringbuf_capacity(ring);
-    const std::uint64_t read =
-        ring->header->read_position.load(std::memory_order_relaxed);
-    const std::uint64_t write =
-        ring->header->write_position.load(std::memory_order_acquire);
-    if (capacity == 0 || write < read || write - read > capacity) {
-        return {};
-    }
-
-    const std::size_t available =
-        static_cast<std::size_t>(write - read);
-    const std::size_t position =
-        static_cast<std::size_t>(read % capacity);
-    const std::size_t contiguous =
-        std::min(available, capacity - position);
-    return {ring->data + position, contiguous};
+std::uint32_t ringbuf_slot_count(const RingBuffer* ring) noexcept {
+    return ring == nullptr || ring->header == nullptr
+               ? 0
+               : ring->header->slot_count;
 }
 
-bool ringbuf_commit_read(
-    RingBuffer* ring,
-    std::size_t len) noexcept {
-    if (ring == nullptr || ring->header == nullptr) {
-        return false;
-    }
-    if (len == 0) {
-        return true;
-    }
-
-    const std::size_t capacity = ringbuf_capacity(ring);
-    const std::uint64_t read =
-        ring->header->read_position.load(std::memory_order_relaxed);
-    const std::uint64_t write =
-        ring->header->write_position.load(std::memory_order_acquire);
-    if (capacity == 0 || write < read || write - read > capacity) {
-        return false;
-    }
-    const std::size_t position =
-        static_cast<std::size_t>(read % capacity);
-    const std::size_t contiguous = std::min(
-        static_cast<std::size_t>(write - read),
-        capacity - position);
-    if (len > contiguous) {
-        return false;
-    }
-
-    ring->header->read_position.store(
-        read + len,
-        std::memory_order_release);
-    return true;
-}
-
-std::span<std::byte> ringbuf_reserve_write(
-    RingBuffer* ring) noexcept {
-    if (ring == nullptr || ring->header == nullptr ||
-        ring->data == nullptr || ringbuf_is_shutdown(ring)) {
-        return {};
-    }
-
-    const std::size_t capacity = ringbuf_capacity(ring);
-    const std::uint64_t write =
-        ring->header->write_position.load(std::memory_order_relaxed);
-    const std::uint64_t read =
-        ring->header->read_position.load(std::memory_order_acquire);
-    if (capacity == 0 || write < read || write - read > capacity) {
-        return {};
-    }
-
-    const std::size_t free =
-        capacity - static_cast<std::size_t>(write - read);
-    const std::size_t position =
-        static_cast<std::size_t>(write % capacity);
-    const std::size_t contiguous =
-        std::min(free, capacity - position);
-    return {ring->data + position, contiguous};
-}
-
-bool ringbuf_commit_write(
-    RingBuffer* ring,
-    std::size_t len) noexcept {
-    if (ring == nullptr || ring->header == nullptr ||
-        ringbuf_is_shutdown(ring)) {
-        return false;
-    }
-    if (len == 0) {
-        return true;
-    }
-
-    const std::size_t capacity = ringbuf_capacity(ring);
-    const std::uint64_t write =
-        ring->header->write_position.load(std::memory_order_relaxed);
-    const std::uint64_t read =
-        ring->header->read_position.load(std::memory_order_acquire);
-    if (capacity == 0 || write < read || write - read > capacity) {
-        return false;
-    }
-    const std::size_t position =
-        static_cast<std::size_t>(write % capacity);
-    const std::size_t contiguous = std::min(
-        capacity - static_cast<std::size_t>(write - read),
-        capacity - position);
-    if (len > contiguous) {
-        return false;
-    }
-
-    ring->header->write_position.store(
-        write + len,
-        std::memory_order_release);
-    return true;
-}
-
-std::size_t ringbuf_capacity(const RingBuffer* ring) noexcept {
+std::size_t ringbuf_max_payload_bytes(
+    const RingBuffer* ring) noexcept {
     return ring == nullptr || ring->header == nullptr
                ? 0
                : static_cast<std::size_t>(
-                     ring->header->capacity_bytes);
+                     ring->header->max_payload_bytes);
+}
+
+std::size_t ringbuf_occupied_slots(
+    const RingBuffer* ring) noexcept {
+    if (ring == nullptr || ring->header == nullptr) {
+        return 0;
+    }
+    const std::uint64_t read =
+        ring->header->read_position.load(std::memory_order_acquire);
+    const std::uint64_t write =
+        ring->header->write_position.load(std::memory_order_acquire);
+    return write >= read && write - read <= ring->header->slot_count
+               ? static_cast<std::size_t>(write - read)
+               : 0;
+}
+
+std::span<std::byte> ringbuf_storage(RingBuffer* ring) noexcept {
+    return ring == nullptr || ring->header == nullptr
+               ? std::span<std::byte>{}
+               : std::span<std::byte>{
+                     ring->slots,
+                     ring->mapping_size - kRingHeaderSize};
 }
 
 bool ringbuf_is_shutdown(const RingBuffer* ring) noexcept {
-    return ring != nullptr && ring->header != nullptr &&
+    return ring == nullptr || ring->header == nullptr ||
            ring->header->shutdown.load(std::memory_order_acquire) != 0;
 }
 
@@ -396,16 +485,17 @@ void ringbuf_shutdown(RingBuffer* ring) noexcept {
 }
 
 void ringbuf_close(RingBuffer* ring) noexcept {
-    if (ring != nullptr) {
-        if (ring->header != nullptr && ring->mapping_size != 0) {
-            ::munmap(ring->header, ring->mapping_size);
-        }
-        delete ring;
+    if (ring == nullptr) {
+        return;
     }
+    if (ring->header != nullptr && ring->mapping_size != 0) {
+        ::munmap(ring->header, ring->mapping_size);
+    }
+    delete ring;
 }
 
 void ringbuf_unlink(const char* name) noexcept {
-    if (name != nullptr) {
+    if (name != nullptr && name[0] != '\0') {
         ::shm_unlink(name);
     }
 }

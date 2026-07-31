@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 
 project(uestcradar_ringbuf LANGUAGES CXX)
 
+include(CTest)
 # This target is the single implementation of the shared-memory RingBuffer
 # ABI used by both the Sidecar and the worker SDK.
 add_library(uestcradar_ringbuf STATIC ringbuf.cpp)
@@ -16,3 +17,27 @@ target_include_directories(uestcradar_ringbuf
     PUBLIC
         "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>"
 )
+
+set(_ringbuf_benchmark_default OFF)
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    set(_ringbuf_benchmark_default ON)
+endif()
+option(
+    UESTCRADAR_RINGBUF_BUILD_BENCHMARK
+    "Build the fixed-slot RingBuffer benchmark"
+    ${_ringbuf_benchmark_default})
+
+if(UESTCRADAR_RINGBUF_BUILD_BENCHMARK)
+    add_executable(ringbuf-benchmark benchmark.cpp)
+    target_link_libraries(ringbuf-benchmark PRIVATE uestcradar_ringbuf)
+    target_compile_options(
+        ringbuf-benchmark PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(ringbuf-test ringbuf_test.cpp)
+    target_link_libraries(ringbuf-test PRIVATE uestcradar_ringbuf)
+    target_compile_options(
+        ringbuf-test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME ringbuf-test COMMAND ringbuf-test)
+endif()

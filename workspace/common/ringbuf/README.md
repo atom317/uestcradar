@@ -1,17 +1,52 @@
-# Common RingBuffer ABI
+# Fixed-slot shared-memory RingBuffer
 
-基于 POSIX shared memory 的无锁 SPSC 字节环。
+Sidecar 与 SDK 共用的 POSIX shared memory ABI。模块可独立编译为
+`uestcradar::ringbuf`，不依赖 Sidecar、UCX 或业务数据类型。
 
-这是 Sidecar 与 SDK 之间的公共 ABI 契约；它不属于任何一方的私有目录。它可被独立 CMake 配置为静态库 `uestcradar::ringbuf`。SDK 发布树携带同版本的 vendor 快照，以保证 SDK 单独交付时仍可自闭环编译。
+## 数据模型
 
-- 生产者仅推进 `write_position`；消费者仅推进 `read_position`。
-- 写满时 `ringbuf_write` 返回 `0`，不覆盖未消费数据。
-- 位置字段分别独占缓存行；发布和读取通过 acquire/release 原子操作同步。
-- `ringbuf_peek_read/commit_read` 和
-  `ringbuf_reserve_write/commit_write` 暴露零拷贝连续区；返回区域最多到
-  环尾，跨尾部分必须在下一次调用处理。
-- 容量由创建方通过 `ringbuf_create(name, capacity_bytes)` 在运行时指定。
-- 共享内存由固定 4096 字节控制头和连续字节数据区组成；头部只保存容量、读写位置、关闭标志和 ABI 信息，数据区不定义消息格式。
-- `benchmark.cpp` 通过两个进程重新映射同一共享内存，并校验数据顺序。
+RingBuffer 是无锁 SPSC 记录队列，而不是无边界字节流。一条记录完整占用一个
+Slot；长度不得超过创建时的 `max_payload_bytes`，因此不存在跨环尾拼接。
 
-运行基准：`make -C workspace/common/ringbuf test`。
+```text
+4096-byte RingBufferHeader
+Slot 0: 64-byte SlotHeader | max_payload_bytes Payload | alignment
+Slot 1: 64-byte SlotHeader | max_payload_bytes Payload | alignment
+...
+```
+
+控制头包含 magic、ABI version、`slot_count`、`max_payload_bytes`、
+`type_id`、`type_version` 和分离缓存行的读写位置。SlotHeader 第一版只保存
+有效 Payload 长度。提交状态由单生产者写位置发布，不为每个 Slot 增加原子量。
+
+## 生命周期与内存序
+
+- 生产者：`ringbuf_reserve` → 写 Payload → `ringbuf_commit`。
+- 消费者：`ringbuf_acquire` → 使用 Payload → `ringbuf_release`。
+- 放弃尚未提交的写入使用 `ringbuf_cancel`。
+- commit 以 release 发布；acquire 以 acquire 观察。
+- Ring 满时返回 `would_block`，绝不覆盖未释放 Slot。
+- Read Lease 或 UCX send 完成前不得 release；UCX receive 成功且长度合法后才
+  commit。
+- `ringbuf_write/read` 是 SDK 兼容用的一记录一次调用拷贝接口。
+
+RingBuffer 仍是 SPSC：不能同时存在两个生产者或两个消费者。热路径不分配
+Payload、不使用 Mutex。
+
+## 构建、测试与 Benchmark
+
+```bash
+cmake -S workspace/common/ringbuf -B build/ringbuf \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build/ringbuf --parallel
+ctest --test-dir build/ringbuf --output-on-failure
+
+./build/ringbuf/ringbuf-benchmark \
+  --payload-bytes 64,4096,65536,1048576 \
+  --slot-counts 2,8,64 \
+  --warmup 3 --duration 15 --repetitions 3 --format jsonl
+```
+
+Benchmark 使用两个进程重新映射同一共享内存，输出有效 Payload MiB/s、消息率、
+平均/P50/P99 Slot 交接延迟和生产/消费进程 CPU。短于数秒的运行只用于冒烟，
+不可作为正式性能结论。

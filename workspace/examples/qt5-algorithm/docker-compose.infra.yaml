@@ -47,5 +47,3 @@ services:
       - SIDECAR_DOWNSTREAM_TYPE_VERSION=1
     depends_on:
       - sidecar-alpha
-
-

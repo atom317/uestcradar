@@ -1,9 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(cycomm_sdk VERSION 1.0.0 LANGUAGES CXX)
+project(cycomm_sdk VERSION 3.0.0 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
+include(CTest)
 
 # The SDK relies on the monorepo's shared RingBuffer implementation.
 set(CYCOMM_RINGBUF_SOURCE_DIR
@@ -26,8 +27,6 @@ add_library(cycomm::sdk ALIAS uestcradar_sdk)
 set_target_properties(uestcradar_sdk PROPERTIES
     OUTPUT_NAME uestcradar_sdk
     EXPORT_NAME sdk
-    CXX_VISIBILITY_PRESET hidden
-    VISIBILITY_INLINES_HIDDEN YES
 )
 
 target_compile_features(uestcradar_sdk PUBLIC cxx_std_20)
@@ -40,6 +39,17 @@ target_include_directories(uestcradar_sdk
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
+
+if(BUILD_TESTING)
+    add_executable(sdk-test src/sdk_test.cpp)
+    target_link_libraries(
+        sdk-test PRIVATE uestcradar_sdk uestcradar::ringbuf)
+    target_include_directories(
+        sdk-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_compile_options(
+        sdk-test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME sdk-test COMMAND sdk-test)
+endif()
 
 if(UNIX AND NOT APPLE)
     target_link_options(uestcradar_sdk PRIVATE
@@ -65,9 +75,8 @@ install(TARGETS uestcradar_sdk
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
 )
-install(FILES include/sdk.h
-    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
-)
+install(FILES include/sdk.h include/data.h
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 install(EXPORT cycomm_sdkTargets
     FILE cycomm_sdkTargets.cmake
     NAMESPACE cycomm::

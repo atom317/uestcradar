@@ -22,6 +22,7 @@
 namespace {
 
 volatile std::sig_atomic_t running = 1;
+constexpr std::uint64_t kDefaultFrameTypeId = 1;
 
 void stop(int) {
     running = 0;
@@ -30,27 +31,6 @@ void stop(int) {
 void install_signal_handlers() {
     std::signal(SIGINT, stop);
     std::signal(SIGTERM, stop);
-}
-
-std::size_t ring_capacity_from_environment() {
-    const char* value = std::getenv("RING_CAPACITY_BYTES");
-    if (value == nullptr || value[0] == '\0') {
-        return kDefaultRingCapacity;
-    }
-
-    char* end = nullptr;
-    errno = 0;
-    const unsigned long long parsed =
-        std::strtoull(value, &end, 10);
-    if (errno != 0 || end == value || *end != '\0' ||
-        parsed < 4096 ||
-        parsed >
-            std::numeric_limits<std::size_t>::max() -
-                kRingHeaderSize) {
-        throw std::invalid_argument(
-            "RING_CAPACITY_BYTES must be an integer >= 4096");
-    }
-    return static_cast<std::size_t>(parsed);
 }
 
 std::size_t size_from_environment(
@@ -81,6 +61,43 @@ std::string environment_or(
     return value == nullptr || value[0] == '\0'
                ? std::string{fallback}
                : std::string{value};
+}
+
+std::uint64_t uint64_from_environment(
+    const char* name,
+    std::uint64_t fallback) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return fallback;
+    }
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long long parsed =
+        std::strtoull(value, &end, 0);
+    if (errno != 0 || end == value || *end != '\0' || parsed == 0) {
+        throw std::invalid_argument(
+            std::string{name} + " must be a positive integer");
+    }
+    return static_cast<std::uint64_t>(parsed);
+}
+
+RingBufferConfig ring_config_from_environment(
+    const char* slot_count_name,
+    const char* max_payload_name,
+    const char* type_id_name,
+    const char* type_version_name) {
+    return {
+        static_cast<std::uint32_t>(size_from_environment(
+            slot_count_name, kDefaultSlotCount, 2, UINT32_MAX)),
+        static_cast<std::uint32_t>(size_from_environment(
+            max_payload_name,
+            kDefaultMaxPayloadBytes,
+            1,
+            INT32_MAX)),
+        uint64_from_environment(type_id_name, kDefaultFrameTypeId),
+        static_cast<std::uint32_t>(size_from_environment(
+            type_version_name, 1, 1, UINT32_MAX)),
+    };
 }
 
 sidecar::network::DataPathMode data_path_from_environment() {
@@ -149,9 +166,9 @@ sidecar::network::UCXTransport create_transport_once(
 
 class OwnedRing {
 public:
-    OwnedRing(const char* name, std::size_t capacity)
-        : name_(name),
-          ring_(ringbuf_create(name, capacity)) {}
+    OwnedRing(std::string name, const RingBufferConfig& config)
+        : name_(std::move(name)),
+          ring_(ringbuf_create(name_.c_str(), config)) {}
 
     OwnedRing(const OwnedRing&) = delete;
     OwnedRing& operator=(const OwnedRing&) = delete;
@@ -159,7 +176,7 @@ public:
     ~OwnedRing() {
         ringbuf_shutdown(ring_);
         ringbuf_close(ring_);
-        ringbuf_unlink(name_);
+        ringbuf_unlink(name_.c_str());
     }
 
     [[nodiscard]] RingBuffer* get() const noexcept {
@@ -167,15 +184,17 @@ public:
     }
 
 private:
-    const char* name_;
+    std::string name_;
     RingBuffer* ring_;
 };
 
 bool snapshot_ring(
     const RingBuffer* ring,
     sidecar::telemetry::RingSnapshot& output) noexcept {
-    const std::uint64_t capacity =
-        ring->header->capacity_bytes;
+    const std::uint64_t slot_count =
+        ring->header->slot_count;
+    const std::uint64_t max_payload =
+        ring->header->max_payload_bytes;
     for (int attempt = 0; attempt < 3; ++attempt) {
         const std::uint64_t read =
             ring->header->read_position.load(
@@ -183,10 +202,10 @@ bool snapshot_ring(
         const std::uint64_t write =
             ring->header->write_position.load(
                 std::memory_order_acquire);
-        if (write >= read && write - read <= capacity) {
+        if (write >= read && write - read <= slot_count) {
             output = sidecar::telemetry::RingSnapshot{
-                capacity,
-                write - read,
+                slot_count * max_payload,
+                (write - read) * max_payload,
                 write,
                 read,
                 ring->header->shutdown.load(
@@ -204,18 +223,30 @@ int main() {
     install_signal_handlers();
 
     try {
-        const std::size_t capacity =
-            ring_capacity_from_environment();
-        const std::size_t maximum_transfer =
-            size_from_environment(
-                "FORWARDER_MAX_TRANSFER_BYTES",
-                sidecar::forwarder::kDefaultMaxTransferBytes,
-                1,
-                capacity);
         const TransportConfig transport_config =
             transport_config_from_environment();
-        OwnedRing upstream{kUpstreamBufName, capacity};
-        OwnedRing downstream{kDownstreamBufName, capacity};
+        const RingBufferConfig upstream_config =
+            ring_config_from_environment(
+                "SIDECAR_UPSTREAM_SLOT_COUNT",
+                "SIDECAR_UPSTREAM_MAX_PAYLOAD_BYTES",
+                "SIDECAR_UPSTREAM_TYPE_ID",
+                "SIDECAR_UPSTREAM_TYPE_VERSION");
+        const RingBufferConfig downstream_config =
+            ring_config_from_environment(
+                "SIDECAR_DOWNSTREAM_SLOT_COUNT",
+                "SIDECAR_DOWNSTREAM_MAX_PAYLOAD_BYTES",
+                "SIDECAR_DOWNSTREAM_TYPE_ID",
+                "SIDECAR_DOWNSTREAM_TYPE_VERSION");
+        OwnedRing upstream{
+            environment_or(
+                "UESTCRADAR_UPSTREAM_SHM_NAME",
+                kUpstreamBufName),
+            upstream_config};
+        OwnedRing downstream{
+            environment_or(
+                "UESTCRADAR_DOWNSTREAM_SHM_NAME",
+                kDownstreamBufName),
+            downstream_config};
 
         const std::vector<sidecar::telemetry::TelemetryTarget> targets{
             {
@@ -234,7 +265,6 @@ int main() {
             },
         };
 
-        std::exception_ptr telemetry_error;
         std::exception_ptr forwarder_error;
         std::thread telemetry_thread([&] {
             try {
@@ -244,9 +274,10 @@ int main() {
                     throw std::runtime_error(
                         "telemetry exporter failed");
                 }
-            } catch (...) {
-                telemetry_error = std::current_exception();
-                running = 0;
+            } catch (const std::exception& error) {
+                std::cerr
+                    << "sidecar: telemetry disabled ("
+                    << error.what() << ')' << std::endl;
             }
         });
         std::thread forwarder_thread([&] {
@@ -255,15 +286,11 @@ int main() {
                     sidecar::network::UCXTransport transport =
                         create_transport_once(transport_config);
                     sidecar::network::UCXMemoryRegion upstream_memory =
-                        transport.register_memory(std::span<std::byte>{
-                            upstream.get()->data,
-                            ringbuf_capacity(upstream.get()),
-                        });
+                        transport.register_memory(
+                            ringbuf_storage(upstream.get()));
                     sidecar::network::UCXMemoryRegion downstream_memory =
-                        transport.register_memory(std::span<std::byte>{
-                            downstream.get()->data,
-                            ringbuf_capacity(downstream.get()),
-                        });
+                        transport.register_memory(
+                            ringbuf_storage(downstream.get()));
 
                     std::cout << "sidecar: UCX peer connected" << std::endl;
                     try {
@@ -273,10 +300,7 @@ int main() {
                             downstream.get(),
                             transport,
                             upstream_memory,
-                            downstream_memory,
-                            sidecar::forwarder::ForwarderOptions{
-                                maximum_transfer,
-                            });
+                            downstream_memory);
                     } catch (...) {
                         forwarder_error = std::current_exception();
                         running = 0;
@@ -296,11 +320,13 @@ int main() {
         });
 
         std::cout
-            << "sidecar: upstream and downstream ready, capacity="
-            << capacity << " bytes each" << std::endl;
+            << "sidecar: fixed-slot rings ready, upstream="
+            << upstream_config.slot_count << "x"
+            << upstream_config.max_payload_bytes
+            << " downstream=" << downstream_config.slot_count << "x"
+            << downstream_config.max_payload_bytes << std::endl;
         std::cout
-            << "sidecar: telemetry started; waiting for UCX peer, max-transfer="
-            << maximum_transfer << " bytes"
+            << "sidecar: telemetry started; waiting for UCX peer"
             << std::endl;
 
         while (running != 0) {
@@ -314,9 +340,6 @@ int main() {
         telemetry_thread.join();
         if (forwarder_error != nullptr) {
             std::rethrow_exception(forwarder_error);
-        }
-        if (telemetry_error != nullptr) {
-            std::rethrow_exception(telemetry_error);
         }
         return 0;
     } catch (const std::exception& error) {

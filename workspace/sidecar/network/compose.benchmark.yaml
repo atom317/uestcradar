@@ -2,7 +2,7 @@ services:
   server:
     build:
       context: ../../..
-      dockerfile: docker/Dockerfile.sidecar
+      dockerfile: workspace/sidecar/Dockerfile
       target: network-benchmark
       args:
         BASE_IMAGE: ${BASE_IMAGE:-registry.chengyistudio.com/cxx/ubuntu:24.04}

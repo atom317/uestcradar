@@ -195,6 +195,44 @@ UCXTransport connect_with_retry(const Arguments& arguments) {
     throw std::runtime_error("connect failed: " + last_error);
 }
 
+void exchange_and_validate_contract(
+    UCXTransport& transport,
+    std::size_t chunk_bytes) {
+    constexpr std::uint64_t iq_frame_type_id = 1;
+    if (chunk_bytes > UINT32_MAX) {
+        throw std::invalid_argument(
+            "chunk-bytes exceeds forwarder protocol limit");
+    }
+    const protocol::PortContract port{
+        iq_frame_type_id,
+        1,
+        static_cast<std::uint32_t>(chunk_bytes),
+    };
+    protocol::HelloBytes incoming{};
+    protocol::HelloBytes outgoing =
+        protocol::encode_hello({port, port});
+    UCXRequest receive =
+        transport.receive(incoming, protocol::kHelloTag);
+    UCXRequest send =
+        transport.send(outgoing, protocol::kHelloTag);
+    transport.wait(send);
+    transport.wait(receive);
+    protocol::Hello remote{};
+    if (receive.bytes_transferred() != incoming.size() ||
+        !protocol::decode_hello(incoming, remote) ||
+        remote.outbound.type_id != port.type_id ||
+        remote.outbound.type_version != port.type_version ||
+        remote.outbound.max_payload_bytes >
+            port.max_payload_bytes ||
+        remote.inbound.type_id != port.type_id ||
+        remote.inbound.type_version != port.type_version ||
+        port.max_payload_bytes >
+            remote.inbound.max_payload_bytes) {
+        throw std::runtime_error(
+            "sidecar forwarder contract is incompatible");
+    }
+}
+
 class BenchmarkPeer {
 public:
     BenchmarkPeer(
@@ -307,9 +345,9 @@ private:
         }
         if (receive_active_ && !payload_completed_ &&
             payload_receive_.completed()) {
+            transport_.wait(payload_receive_);
             const std::size_t received =
                 payload_receive_.bytes_transferred();
-            transport_.wait(payload_receive_);
             if (received == 0 ||
                 !std::all_of(
                     receive_buffer_.begin(),
@@ -384,6 +422,8 @@ int main(int argc, char* argv[]) {
     try {
         const Arguments arguments = parse_arguments(argc, argv);
         UCXTransport transport = connect_with_retry(arguments);
+        exchange_and_validate_contract(
+            transport, arguments.chunk_bytes);
         BenchmarkPeer peer{transport, arguments.chunk_bytes};
 
         const auto started = Clock::now();

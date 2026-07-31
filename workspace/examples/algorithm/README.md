@@ -21,32 +21,44 @@ graph TD
 请直接使用本目录为您准备好的 `docker-compose.infra.yaml` 启动基座：
 
 ```bash
-docker compose -f docker-compose.infra.yaml up -d
+ docker-compose -f docker-compose.infra.yaml up -d --force-recreate --pull always
 ```
+
 启动成功后，水管已经接通，模拟数据已经堵在 `sidecar-beta` 的内存中，等待您的算法提取。
 
 ## 第二步：编写您的算法
 
-在这个框架下，您完全不需要关心底层网络。所有的复杂度（包括通信、内存管理）都被封装在 `sdk.h` 中，而业务数学逻辑（如 FFT）则封装在 `my_algorithm.hpp` 中。
+在框架下，您完全不需要关心底层网络。所有的复杂度（包括通信、内存管理）都被封装在 `sdk.h` 中，而业务数学逻辑（如脉冲压缩）则封装在 `my_algorithm.hpp` 中。
 
 您的主程序（`main.cpp`）将变得像自然语言一样清晰易懂。以下是使用 SDK 的标准“四步曲”伪代码：
 
 ```cpp
-#include "sdk.h"
-#include "my_algorithm.hpp"
+#include <data.h>            // 1. 引入雷达标准数据结构定义 (如 IQFrame, PulseCompressionFrame)
+#include <sdk.h>             // 2. 引入雷达零拷贝 SDK 核心通信管道接口
+#include "my_algorithm.hpp"  // 3. 引入算法工程师自定义的数学解算头文件
 
 int main() {
-    // 1. 接入基座的数据管道
-    io_open();
+    using namespace uestcradar;
 
-    // 2. 无脑拉取测试数据
-    io_read(buffer, size);
-    
-    // 3. 执行纯数学逻辑 (无需关心数据是怎么飞过来的)
-    RadarAlgo::process_fft_and_save(buffer, output_path);
-    
-    // 4. 关闭管道
-    io_close();
+    // 第一步：声明输入/输出管道（自动连接 Sidecar 共享内存数据井）
+    Input<IQFrame> input;
+    Output<PulseCompressionFrame> output;
+
+    // 第二步：从共享内存中阻塞读取一帧雷达原始 IQ 信号数据
+    auto iq = input.read();
+
+    // 第三步：在共享内存中创建并初始化输出帧的初始值
+    auto pulse = output.create({
+        .frame_id = iq.metadata.frame_id,
+        .channel_count = iq.metadata.channel_count,
+        .range_bin_count = iq.metadata.samples_per_channel,
+    });
+
+    // 第四步：调用算法核心逻辑，将输入的 IQ 时域数据解算为脉频数据
+    process(iq.data, pulse.data);
+
+    // 第五步：将处理完成的数据帧提交写出至下游
+    output.write(pulse);
 }
 ```
 
@@ -55,10 +67,10 @@ int main() {
 ## 第三步：算法构建
 
 写好算法后，使用本目录极简的 `Dockerfile` 编译出您的算法容器。
-（得益于底层的 `algo-base`，您只需要在这个目录下直接执行构建即可，极其快速！）
+（得益于底层的 `algo-base`，您只需要在这个目录下直接执行构建即可，使用 `--pull` 可确保拉取最新的基座镜像，避免 SDK ABI 不一致问题！）
 
 ```bash
-docker build -t my-radar-algorithm:dev .
+docker build --pull -t my-radar-algorithm:dev .
 ```
 
 ## 第四步：运行与调试
@@ -67,6 +79,7 @@ docker build -t my-radar-algorithm:dev .
 
 **模式 A：直接运行算法**
 如果您确认代码无误，希望让它在后台默默跑完并输出结果文件，请明确指定 `--entrypoint` 为算法主程序：
+
 ```bash
 docker run -d --rm \
   --name my-algorithm \
@@ -76,10 +89,12 @@ docker run -d --rm \
   --entrypoint /app/algorithm \
   my-radar-algorithm:dev
 ```
-运行结束后，在本地的 `output` 文件夹查看 `fft_result.pgm` 的频谱结果，完成算法闭环验证。
+
+运行结束后，在本地的 `output` 文件夹查看 `pulse_compression_result.pgm` 的脉冲压缩结果图像，完成算法闭环验证。
 
 **模式 B：进入容器交互式调试**
 如果您的算法抛出了异常，或者希望像在本地一样使用 `gdb` 或修改代码，请将 `--entrypoint` 覆盖为 `/bin/bash` 并开启交互终端（`-it`）：
+
 ```bash
 docker run -it --rm \
   --name my-algorithm-debug \
@@ -89,6 +104,7 @@ docker run -it --rm \
   --entrypoint /bin/bash \
   my-radar-algorithm:dev
 ```
+
 进入容器后，由于底层自带了完整的 C++ 编译工具链，您可以手动执行 `./algorithm` 观察报错输出。甚至可以将本机代码目录挂载进去当场修改、当场重新编译，无需反复构建镜像，极大地提升调试效率！
 
 ## 第五步：发布镜像至私有源 (用于生产部署)

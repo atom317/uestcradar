@@ -16,9 +16,11 @@
 ```text
 uestcradar/
 ├── workspace/
-│   └── qt5core/
-│       ├── main.cpp
-│       └── qt5core_thread_example.pro
+│   └── examples/
+│       └── qt5core/
+│           └── src/
+│               ├── main.cpp
+│               └── qt5core_thread_example.pro
 └── docker/
     └── qt5core/
         ├── compose.yaml

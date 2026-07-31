@@ -1,42 +1,72 @@
-#include "sdk.h"
+#include <data.h>
+#include <sdk.h>
+
 #include "my_waveform.hpp"
-#include <vector>
+
+#include <chrono>
 #include <complex>
+#include <cstdint>
 #include <iostream>
+#include <thread>
+#include <vector>
 
 int main() {
-    // -----------------------------------------------------------------
-    // 步骤 1: 接通网络数据发送端口 (对底层基建透明)
-    // -----------------------------------------------------------------
-    if (io_open() != 0) {
-        std::cerr << "接入发送网关失败！\n";
+    try {
+        using namespace uestcradar;
+
+        // 启动独立线程作 Loopback 数据消费，解锁算法输出背压
+        std::thread drain_thread([]() {
+            try {
+                Input<PulseCompressionFrame> pc_input;
+                std::cout << "[signalsource 回环端] 成功启动 Loopback 接收线程，持续释放槽位...\n";
+                while (true) {
+                    auto frame = pc_input.read();
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "[signalsource 回环端] 接收异常退出: " << e.what() << "\n";
+            }
+        });
+        drain_thread.detach();
+
+        Output<IQFrame> output;
+        std::vector<std::complex<float>> waveform(1024);
+        RadarSource::generate_sine_wave(waveform);
+        std::uint64_t frame_id = 0;
+        std::cout << "成功生成模拟 IQ 波形，开始持续发送...\n";
+
+        for (;;) {
+            const auto now = std::chrono::system_clock::now();
+            auto frame = output.create({
+                .frame_id = ++frame_id,
+                .timestamp_unix_ns =
+                    static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<
+                            std::chrono::nanoseconds>(
+                            now.time_since_epoch())
+                            .count()),
+                .channel_count = 1,
+                .samples_per_channel =
+                    static_cast<std::uint32_t>(waveform.size()),
+                .sample_rate_hz = 1000.0,
+                .center_frequency_hz = 0.0,
+            });
+            for (std::size_t index = 0;
+                 index < waveform.size();
+                 ++index) {
+                frame.data[0][index] = {
+                    static_cast<std::int16_t>(
+                        waveform[index].real() * 30'000.0F),
+                    static_cast<std::int16_t>(
+                        waveform[index].imag() * 30'000.0F),
+                };
+            }
+            output.write(frame);
+
+            // 保持 100Hz 稳定模拟物理雷达发送帧率 (10ms)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    } catch (const std::exception& error) {
+        std::cerr << "发送 IQ 数据失败：" << error.what() << '\n';
         return 1;
     }
-
-    // -----------------------------------------------------------------
-    // 步骤 2: 生成一帧雷达模拟数据 (1024 个点)
-    // -----------------------------------------------------------------
-    std::vector<std::complex<float>> frame_data(1024);
-    RadarSource::generate_sine_wave(frame_data);
-    std::cout << "成功生成模拟信号波形，开始持续发送...\n";
-
-    // -----------------------------------------------------------------
-    // 步骤 3: 不断往外打数据，直到对方拒收
-    // -----------------------------------------------------------------
-    for (;;) {
-        // 无脑 write，如果发得太快，io_write 内部会自动等待 (背压)
-        int32_t bytes_written = io_write(frame_data.data(), frame_data.size() * sizeof(std::complex<float>));
-        
-        if (bytes_written <= 0) {
-            break; // 对方断开连接或发生错误
-        }
-    }
-
-    // -----------------------------------------------------------------
-    // 步骤 4: 关闭连接，释放资源
-    // -----------------------------------------------------------------
-    io_close();
-    std::cout << "发送结束。\n";
-
-    return 0;
 }

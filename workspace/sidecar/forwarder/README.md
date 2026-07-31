@@ -6,12 +6,13 @@ Forwarder 是唯一同时使用 RingBuffer 数据 API 和 UCXTransport 数据 AP
 ## 数据路径
 
 - outbound：从 worker-facing downstream 等待对端 credit，
-  `ringbuf_peek_read()` 取得环尾以内的连续区，UCX Send 完成后才
-  `ringbuf_commit_read()`。
-- inbound：在 worker-facing upstream 上调用 `ringbuf_reserve_write()`，
-  先投递 UCX Receive，再向
-  对端发送该区域长度的 credit；Receive 完成后才
-  `ringbuf_commit_write()`。
+  `ringbuf_acquire()` 持有一条完整记录，UCX Send 完成后才
+  `ringbuf_release()`。
+- inbound：在 worker-facing upstream 上调用 `ringbuf_reserve()` 持有一个
+  完整 Slot，先投递 UCX Receive，再向对端发送该 Slot 的 Payload 容量；
+  Receive 成功且长度合法后才 `ringbuf_commit()`，失败则 cancel。
+- 建连后先交换两个端口的 `type_id/type_version/max_payload_bytes`。本机输出
+  必须匹配远端输入，反方向同理；不匹配时在搬运 Payload 前失败。
 - 每个方向最多一个 credit 和一个 Payload 请求在途。credit 是固定 8 字节
   网络字节序控制消息，Payload 不经过临时数组、vector 或 memcpy。
 - 空环、满环和网络无进展时采用短自旋、yield、50 us 休眠的渐进退避。

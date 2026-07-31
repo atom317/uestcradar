@@ -18,16 +18,15 @@
 
 namespace {
 
-using sidecar::forwarder::ForwarderOptions;
 using sidecar::network::EndpointOptions;
 using sidecar::network::UCXMemoryRegion;
 using sidecar::network::UCXTransport;
 
 class TestRing {
 public:
-    explicit TestRing(std::string name)
+    TestRing(std::string name, RingBufferConfig config)
         : name_(std::move(name)),
-          ring_(ringbuf_create(name_.c_str(), 16 * 1024)) {}
+          ring_(ringbuf_create(name_.c_str(), config)) {}
 
     TestRing(const TestRing&) = delete;
     TestRing& operator=(const TestRing&) = delete;
@@ -52,23 +51,18 @@ bool write_all(
     std::span<const std::byte> bytes) {
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds{10};
-    std::size_t offset = 0;
-    while (offset < bytes.size() &&
-           std::chrono::steady_clock::now() < deadline) {
+    while (std::chrono::steady_clock::now() < deadline) {
         const std::int32_t result = ringbuf_write(
-            ring,
-            bytes.data() + offset,
-            bytes.size() - offset);
-        if (result < 0) {
-            return false;
-        }
-        if (result == 0) {
+            ring, bytes.data(), bytes.size());
+        if (result == static_cast<std::int32_t>(bytes.size())) {
+            return true;
+        } else if (result == 0) {
             std::this_thread::yield();
         } else {
-            offset += static_cast<std::size_t>(result);
+            return false;
         }
     }
-    return offset == bytes.size();
+    return false;
 }
 
 bool read_all(
@@ -76,23 +70,18 @@ bool read_all(
     std::span<std::byte> bytes) {
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds{10};
-    std::size_t offset = 0;
-    while (offset < bytes.size() &&
-           std::chrono::steady_clock::now() < deadline) {
+    while (std::chrono::steady_clock::now() < deadline) {
         const std::int32_t result = ringbuf_read(
-            ring,
-            bytes.data() + offset,
-            bytes.size() - offset);
-        if (result < 0) {
-            return false;
-        }
-        if (result == 0) {
+            ring, bytes.data(), bytes.size());
+        if (result == static_cast<std::int32_t>(bytes.size())) {
+            return true;
+        } else if (result == 0) {
             std::this_thread::yield();
         } else {
-            offset += static_cast<std::size_t>(result);
+            return false;
         }
     }
-    return offset == bytes.size();
+    return false;
 }
 
 void shutdown_all(
@@ -113,10 +102,13 @@ int main() {
 
     const std::string prefix =
         "/uestcradar_forwarder_test_" + std::to_string(::getpid());
-    TestRing a_upstream{prefix + "_a_up"};
-    TestRing a_downstream{prefix + "_a_down"};
-    TestRing b_upstream{prefix + "_b_up"};
-    TestRing b_downstream{prefix + "_b_down"};
+    constexpr std::uint32_t kPayloadBytes = 256 * 1024;
+    const RingBufferConfig type_one{4, kPayloadBytes, 1, 1};
+    const RingBufferConfig type_two{4, kPayloadBytes, 2, 1};
+    TestRing a_upstream{prefix + "_a_up", type_two};
+    TestRing a_downstream{prefix + "_a_down", type_one};
+    TestRing b_upstream{prefix + "_b_up", type_one};
+    TestRing b_downstream{prefix + "_b_down", type_two};
 
     const auto port = static_cast<std::uint16_t>(
         20'000 + (::getpid() % 20'000));
@@ -134,23 +126,18 @@ int main() {
                     std::chrono::seconds{10},
                 });
             UCXMemoryRegion upstream_memory =
-                transport.register_memory(std::span<std::byte>{
-                    a_upstream.get()->data,
-                    ringbuf_capacity(a_upstream.get()),
-                });
+                transport.register_memory(
+                    ringbuf_storage(a_upstream.get()));
             UCXMemoryRegion downstream_memory =
-                transport.register_memory(std::span<std::byte>{
-                    a_downstream.get()->data,
-                    ringbuf_capacity(a_downstream.get()),
-                });
+                transport.register_memory(
+                    ringbuf_storage(a_downstream.get()));
             sidecar::forwarder::run_forwarder(
                 a_running,
                 a_upstream.get(),
                 a_downstream.get(),
                 transport,
                 upstream_memory,
-                downstream_memory,
-                ForwarderOptions{1024});
+                downstream_memory);
         } catch (...) {
             a_error = std::current_exception();
             a_running = 0;
@@ -167,23 +154,18 @@ int main() {
                     std::chrono::seconds{10},
                 });
             UCXMemoryRegion upstream_memory =
-                transport.register_memory(std::span<std::byte>{
-                    b_upstream.get()->data,
-                    ringbuf_capacity(b_upstream.get()),
-                });
+                transport.register_memory(
+                    ringbuf_storage(b_upstream.get()));
             UCXMemoryRegion downstream_memory =
-                transport.register_memory(std::span<std::byte>{
-                    b_downstream.get()->data,
-                    ringbuf_capacity(b_downstream.get()),
-                });
+                transport.register_memory(
+                    ringbuf_storage(b_downstream.get()));
             sidecar::forwarder::run_forwarder(
                 b_running,
                 b_upstream.get(),
                 b_downstream.get(),
                 transport,
                 upstream_memory,
-                downstream_memory,
-                ForwarderOptions{1024});
+                downstream_memory);
         } catch (...) {
             b_error = std::current_exception();
             b_running = 0;

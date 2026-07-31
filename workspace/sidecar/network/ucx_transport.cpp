@@ -119,6 +119,8 @@ struct UCXTransport::Impl : std::enable_shared_from_this<Impl> {
         };
 
         try {
+            configure("TCP_CM_REUSEADDR", "y");
+            configure("RDMA_CM_REUSEADDR", "y");
             if (data_path == DataPathMode::strict_rdma) {
                 configure("TLS", "rc");
                 configure("RNDV_THRESH", "0");

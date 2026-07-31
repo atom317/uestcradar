@@ -36,31 +36,25 @@ private:
 
 bool run_peer(
     bool listener,
+    bool producer,
     std::uint16_t port,
-    RingBuffer* upstream,
-    RingBuffer* downstream) {
+    RingBuffer* ring) {
     try {
         const sidecar::network::EndpointOptions options{
-            "127.0.0.1",
-            port,
-            std::chrono::seconds{10},
-        };
+            "127.0.0.1", port, std::chrono::seconds{10}};
         sidecar::network::UCXTransport transport =
             listener
                 ? sidecar::network::UCXTransport::accept_one(options)
                 : sidecar::network::UCXTransport::connect(options);
-        auto upstream_memory =
-            transport.register_memory(ringbuf_storage(upstream));
-        auto downstream_memory =
-            transport.register_memory(ringbuf_storage(downstream));
+        auto memory = transport.register_memory(ringbuf_storage(ring));
         volatile std::sig_atomic_t running = 1;
-        sidecar::forwarder::run_forwarder(
-            running,
-            upstream,
-            downstream,
-            transport,
-            upstream_memory,
-            downstream_memory);
+        if (producer) {
+            sidecar::forwarder::run_egress_session(
+                running, ring, transport, memory);
+        } else {
+            sidecar::forwarder::run_ingress_session(
+                running, ring, transport, memory);
+        }
     } catch (const std::exception&) {
         return true;
     }
@@ -74,10 +68,8 @@ int main() {
     const std::string prefix =
         "/uestcradar_contract_test_" + std::to_string(::getpid());
     constexpr std::uint32_t capacity = 4096;
-    TestRing a_up{prefix + "_a_up", {2, capacity, 22, 1}};
-    TestRing a_down{prefix + "_a_down", {2, capacity, 11, 1}};
-    TestRing b_up{prefix + "_b_up", {2, capacity, 99, 1}};
-    TestRing b_down{prefix + "_b_down", {2, capacity, 22, 1}};
+    TestRing producer{prefix + "_producer", {2, capacity, 11, 1}};
+    TestRing consumer{prefix + "_consumer", {2, capacity, 99, 1}};
     const auto port = static_cast<std::uint16_t>(
         40'000 + (::getpid() % 10'000));
 
@@ -85,14 +77,14 @@ int main() {
         std::launch::async,
         [&] {
             return run_peer(
-                true, port, a_up.get(), a_down.get());
+                true, false, port, consumer.get());
         });
     std::this_thread::sleep_for(std::chrono::milliseconds{100});
     auto connector = std::async(
         std::launch::async,
         [&] {
             return run_peer(
-                false, port, b_up.get(), b_down.get());
+                false, true, port, producer.get());
         });
 
     return listener.get() && connector.get() ? 0 : 1;

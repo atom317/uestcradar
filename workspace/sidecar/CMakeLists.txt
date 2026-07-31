@@ -84,4 +84,15 @@ if(BUILD_TESTING)
         COMMAND forwarder-contract-test)
     set_tests_properties(
         forwarder-contract-test PROPERTIES TIMEOUT 30)
+
+    add_executable(
+        leg-lifecycle-test
+        forwarder/leg_lifecycle_test.cpp)
+    target_link_libraries(
+        leg-lifecycle-test PRIVATE cycomm::forwarder)
+    target_compile_options(
+        leg-lifecycle-test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(
+        NAME leg-lifecycle-test
+        COMMAND leg-lifecycle-test)
 endif()

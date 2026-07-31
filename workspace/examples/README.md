@@ -2,6 +2,11 @@
 
 欢迎使用 **UESTC Radar SDK**！本目录提供了 5 个渐进式的示例项目。所有底层的零拷贝内存管理、通信与背压逻辑已被全盘封装，您可以根据实际业务场景选择最适合的开发模板。
 
+> `algorithm`、`qt5-algorithm` 和 `signalsource` 目录中的
+> `docker-compose.infra.yaml` 是旧单端点 Sidecar 部署模板，尚未迁移到双 Leg
+> 环境变量，不能直接用于当前 Sidecar。双 Leg 级联请使用
+> `sidecar/tools/compose.cascade.yaml`；示例的 Worker 源码与 SDK 用法仍有效。
+
 ---
 
 ## 🧭 选型决策树与示例速览

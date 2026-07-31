@@ -1,0 +1,78 @@
+version: "2.4"
+
+services:
+  sidecar-node:
+    image: ${SIDECAR_IMAGE:?set SIDECAR_IMAGE to an immutable registry digest}
+    platform: linux/arm64
+    network_mode: host
+    ipc: shareable
+    shm_size: ${SIDECAR_SHM_SIZE:-256m}
+    devices:
+      - /dev/infiniband:/dev/infiniband
+    cap_add:
+      - IPC_LOCK
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    environment:
+      NODE_ID: ${NODE_ID:?set NODE_ID to node-a, node-b, or node-c}
+      SIDECAR_UPSTREAM_ROLE: ${UPSTREAM_ROLE:?set UPSTREAM_ROLE}
+      SIDECAR_UPSTREAM_BIND_HOST: ${UPSTREAM_BIND_HOST:-0.0.0.0}
+      SIDECAR_UPSTREAM_PEER_HOST: ${UPSTREAM_PEER_HOST:-127.0.0.1}
+      SIDECAR_UPSTREAM_PORT: ${UPSTREAM_PORT:-13337}
+      SIDECAR_UPSTREAM_CONNECT_TIMEOUT_MS: ${CONNECT_TIMEOUT_MS:-1000}
+      SIDECAR_UPSTREAM_DATA_PATH: ${SIDECAR_DATA_PATH:-strict-rdma}
+      SIDECAR_DOWNSTREAM_ROLE: ${DOWNSTREAM_ROLE:?set DOWNSTREAM_ROLE}
+      SIDECAR_DOWNSTREAM_BIND_HOST: ${DOWNSTREAM_BIND_HOST:-0.0.0.0}
+      SIDECAR_DOWNSTREAM_PEER_HOST: ${DOWNSTREAM_PEER_HOST:-127.0.0.1}
+      SIDECAR_DOWNSTREAM_PORT: ${DOWNSTREAM_PORT:-13337}
+      SIDECAR_DOWNSTREAM_CONNECT_TIMEOUT_MS: ${CONNECT_TIMEOUT_MS:-1000}
+      SIDECAR_DOWNSTREAM_DATA_PATH: ${SIDECAR_DATA_PATH:-strict-rdma}
+      SIDECAR_UPSTREAM_SHM_NAME: /uestcradar_cascade_upstream
+      SIDECAR_DOWNSTREAM_SHM_NAME: /uestcradar_cascade_downstream
+      SIDECAR_UPSTREAM_SLOT_COUNT: ${SLOT_COUNT:-64}
+      SIDECAR_UPSTREAM_MAX_PAYLOAD_BYTES: ${MAX_PAYLOAD_BYTES:-1048576}
+      SIDECAR_UPSTREAM_TYPE_ID: "1"
+      SIDECAR_UPSTREAM_TYPE_VERSION: "1"
+      SIDECAR_DOWNSTREAM_SLOT_COUNT: ${SLOT_COUNT:-64}
+      SIDECAR_DOWNSTREAM_MAX_PAYLOAD_BYTES: ${MAX_PAYLOAD_BYTES:-1048576}
+      SIDECAR_DOWNSTREAM_TYPE_ID: "1"
+      SIDECAR_DOWNSTREAM_TYPE_VERSION: "1"
+      UCX_TLS: ${UCX_TLS:-rc,self}
+      UCX_NET_DEVICES: ${UCX_NET_DEVICES:-all}
+      UCX_SOCKADDR_TLS_PRIORITY: ${UCX_SOCKADDR_TLS_PRIORITY:-rdmacm}
+      UCX_RC_VERBS_TX_MIN_SGE: ${UCX_RC_VERBS_TX_MIN_SGE:-2}
+      UCX_UD_VERBS_TX_MIN_SGE: ${UCX_UD_VERBS_TX_MIN_SGE:-1}
+      UCX_PROTO_INFO: ${UCX_PROTO_INFO:-n}
+      UCX_LOG_LEVEL: ${UCX_LOG_LEVEL:-warn}
+      TELEMETRY_HOST: ${TELEMETRY_HOST:-127.0.0.1}
+
+  worker-node:
+    image: ${CASCADE_IMAGE:?set CASCADE_IMAGE to an immutable registry digest}
+    platform: linux/arm64
+    network_mode: host
+    ipc: service:sidecar-node
+    environment:
+      UESTCRADAR_UPSTREAM_SHM_NAME: /uestcradar_cascade_upstream
+      UESTCRADAR_DOWNSTREAM_SHM_NAME: /uestcradar_cascade_downstream
+    entrypoint: ["/app/cascade-worker"]
+    command:
+      - --role
+      - ${CASCADE_ROLE:?set CASCADE_ROLE to source, operator, or sink}
+      - --test
+      - ${TEST_MODE:-correctness}
+      - --payload-bytes
+      - ${PAYLOAD_BYTES:-65536}
+      - --frames
+      - ${FRAMES:-10000}
+      - --seed
+      - ${SEED:-324508639}
+      - --warmup-seconds
+      - ${WARMUP_SECONDS:-3}
+      - --duration-seconds
+      - ${DURATION_SECONDS:-30}
+      - --rate-mib-s
+      - ${RATE_MIB_S:-0}
+    depends_on:
+      - sidecar-node

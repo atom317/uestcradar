@@ -31,6 +31,7 @@ namespace protocol = sidecar::forwarder::protocol;
 
 struct Arguments {
     std::string host{"127.0.0.1"};
+    std::string role{"consumer"};
     std::uint16_t port{13337};
     std::chrono::seconds duration{24};
     std::size_t chunk_bytes{256 * 1024};
@@ -78,6 +79,13 @@ Arguments parse_arguments(int argc, char* argv[]) {
 
         if (argument == "--host") {
             result.host = next();
+        } else if (argument == "--role") {
+            result.role = next();
+            if (result.role != "producer" &&
+                result.role != "consumer") {
+                throw std::invalid_argument(
+                    "role must be producer or consumer");
+            }
         } else if (argument == "--port") {
             const std::uint64_t port = parse_unsigned(next(), "port");
             if (port == 0 || port > 65535) {
@@ -120,6 +128,7 @@ Arguments parse_arguments(int argc, char* argv[]) {
         } else {
             throw std::invalid_argument(
                 "usage: network-benchmark [--host HOST] [--port PORT] "
+                "[--role producer|consumer] "
                 "[--duration SEC] [--chunk-bytes BYTES] "
                 "[--profile steady|jitter] "
                 "[--produce-mib-s RATE] [--consume-mib-s RATE] "
@@ -197,7 +206,8 @@ UCXTransport connect_with_retry(const Arguments& arguments) {
 
 void exchange_and_validate_contract(
     UCXTransport& transport,
-    std::size_t chunk_bytes) {
+    std::size_t chunk_bytes,
+    bool producer) {
     constexpr std::uint64_t iq_frame_type_id = 1;
     if (chunk_bytes > UINT32_MAX) {
         throw std::invalid_argument(
@@ -210,7 +220,12 @@ void exchange_and_validate_contract(
     };
     protocol::HelloBytes incoming{};
     protocol::HelloBytes outgoing =
-        protocol::encode_hello({port, port});
+        protocol::encode_hello({
+            producer
+                ? protocol::PortRole::producer
+                : protocol::PortRole::consumer,
+            port,
+        });
     UCXRequest receive =
         transport.receive(incoming, protocol::kHelloTag);
     UCXRequest send =
@@ -220,14 +235,16 @@ void exchange_and_validate_contract(
     protocol::Hello remote{};
     if (receive.bytes_transferred() != incoming.size() ||
         !protocol::decode_hello(incoming, remote) ||
-        remote.outbound.type_id != port.type_id ||
-        remote.outbound.type_version != port.type_version ||
-        remote.outbound.max_payload_bytes >
-            port.max_payload_bytes ||
-        remote.inbound.type_id != port.type_id ||
-        remote.inbound.type_version != port.type_version ||
-        port.max_payload_bytes >
-            remote.inbound.max_payload_bytes) {
+        remote.role == (producer
+                           ? protocol::PortRole::producer
+                           : protocol::PortRole::consumer) ||
+        remote.contract.type_id != port.type_id ||
+        remote.contract.type_version != port.type_version ||
+        (producer
+             ? port.max_payload_bytes >
+                   remote.contract.max_payload_bytes
+             : remote.contract.max_payload_bytes >
+                   port.max_payload_bytes)) {
         throw std::runtime_error(
             "sidecar forwarder contract is incompatible");
     }
@@ -246,11 +263,11 @@ public:
 
     bool progress(
         const Rates& rates,
-        Clock::time_point now) {
-        bool activity = false;
-        activity = progress_outbound(rates.produce, now) || activity;
-        activity = progress_inbound(rates.consume, now) || activity;
-        return activity;
+        Clock::time_point now,
+        bool producer) {
+        return producer
+                   ? progress_outbound(rates.produce, now)
+                   : progress_inbound(rates.consume, now);
     }
 
     std::uint64_t take_sent_bytes() noexcept {
@@ -421,9 +438,10 @@ double to_mib(std::uint64_t bytes) {
 int main(int argc, char* argv[]) {
     try {
         const Arguments arguments = parse_arguments(argc, argv);
+        const bool producer = arguments.role == "producer";
         UCXTransport transport = connect_with_retry(arguments);
         exchange_and_validate_contract(
-            transport, arguments.chunk_bytes);
+            transport, arguments.chunk_bytes, producer);
         BenchmarkPeer peer{transport, arguments.chunk_bytes};
 
         const auto started = Clock::now();
@@ -434,6 +452,7 @@ int main(int argc, char* argv[]) {
         std::cout
             << "network-benchmark: connected host=" << arguments.host
             << " port=" << arguments.port
+            << " role=" << arguments.role
             << " profile=" << arguments.profile
             << " chunk=" << arguments.chunk_bytes << " bytes\n";
 
@@ -441,7 +460,7 @@ int main(int argc, char* argv[]) {
             const auto now = Clock::now();
             const Rates rates = current_rates(arguments, started);
             bool activity = transport.progress();
-            activity = peer.progress(rates, now) || activity;
+            activity = peer.progress(rates, now, producer) || activity;
 
             if (now - last_report >= std::chrono::seconds{1}) {
                 const double elapsed =

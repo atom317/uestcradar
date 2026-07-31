@@ -25,14 +25,11 @@ protocol::PortContract contract(const RingBuffer* ring) {
     };
 }
 
-void exchange_and_validate_contracts(
-    RingBuffer* upstream,
-    RingBuffer* downstream,
+void exchange_and_validate_contract(
+    RingBuffer* ring,
+    protocol::PortRole local_role,
     UCXTransport& transport) {
-    const protocol::Hello local{
-        contract(downstream),
-        contract(upstream),
-    };
+    const protocol::Hello local{local_role, contract(ring)};
     protocol::HelloBytes outgoing = protocol::encode_hello(local);
     protocol::HelloBytes incoming{};
     UCXRequest receive =
@@ -44,35 +41,45 @@ void exchange_and_validate_contracts(
     if (receive.bytes_transferred() != incoming.size()) {
         throw std::runtime_error("forwarder hello has invalid length");
     }
+
     protocol::Hello remote{};
     if (!protocol::decode_hello(incoming, remote)) {
         throw std::runtime_error("forwarder hello is invalid");
     }
-    const bool outbound_compatible =
-        local.outbound.type_id == remote.inbound.type_id &&
-        local.outbound.type_version ==
-            remote.inbound.type_version &&
-        local.outbound.max_payload_bytes <=
-            remote.inbound.max_payload_bytes;
-    const bool inbound_compatible =
-        local.inbound.type_id == remote.outbound.type_id &&
-        local.inbound.type_version ==
-            remote.outbound.type_version &&
-        remote.outbound.max_payload_bytes <=
-            local.inbound.max_payload_bytes;
-    if (!outbound_compatible || !inbound_compatible) {
+    if (remote.role == local.role) {
+        throw std::runtime_error(
+            "forwarder peer has the same port role");
+    }
+
+    const protocol::PortContract& producer =
+        local.role == protocol::PortRole::producer
+            ? local.contract
+            : remote.contract;
+    const protocol::PortContract& consumer =
+        local.role == protocol::PortRole::consumer
+            ? local.contract
+            : remote.contract;
+    if (producer.type_id != consumer.type_id ||
+        producer.type_version != consumer.type_version ||
+        producer.max_payload_bytes > consumer.max_payload_bytes) {
         throw std::runtime_error(
             "forwarder peer port contracts are incompatible");
     }
 }
 
-class OutboundPump {
+class EgressPump {
 public:
-    OutboundPump(
+    EgressPump(
         RingBuffer* ring,
         UCXTransport& transport,
         const UCXMemoryRegion& memory)
         : ring_(ring), transport_(transport), memory_(memory) {}
+
+    ~EgressPump() {
+        if (read_lease_.active()) {
+            static_cast<void>(ringbuf_release(read_lease_));
+        }
+    }
 
     bool progress() {
         bool activity = false;
@@ -84,7 +91,7 @@ public:
             } else if (result != RingResult::would_block &&
                        result != RingResult::shutdown) {
                 throw std::runtime_error(
-                    "forwarder could not acquire source slot");
+                    "egress could not acquire source slot");
             }
         }
         if (!credit_receive_active_ && !credit_available_) {
@@ -129,7 +136,7 @@ public:
             if (payload_send_.bytes_transferred() != payload_length_ ||
                 ringbuf_release(read_lease_) != RingResult::ok) {
                 throw std::runtime_error(
-                    "forwarder could not release sent slot");
+                    "egress could not release sent slot");
             }
             payload_send_active_ = false;
             credit_available_ = false;
@@ -155,13 +162,17 @@ private:
     bool payload_send_active_{false};
 };
 
-class InboundPump {
+class IngressPump {
 public:
-    InboundPump(
+    IngressPump(
         RingBuffer* ring,
         UCXTransport& transport,
         const UCXMemoryRegion& memory)
         : ring_(ring), transport_(transport), memory_(memory) {}
+
+    ~IngressPump() {
+        ringbuf_cancel(write_lease_);
+    }
 
     bool progress() {
         bool activity = false;
@@ -184,7 +195,7 @@ public:
             } else if (result != RingResult::would_block &&
                        result != RingResult::shutdown) {
                 throw std::runtime_error(
-                    "forwarder could not reserve destination slot");
+                    "ingress could not reserve destination slot");
             }
         }
         if (active_ && !payload_committed_ &&
@@ -198,7 +209,7 @@ public:
                     ringbuf_commit(write_lease_, received) !=
                         RingResult::ok) {
                     throw std::runtime_error(
-                        "forwarder received invalid record length");
+                        "ingress received invalid record length");
                 }
             } catch (...) {
                 ringbuf_cancel(write_lease_);
@@ -248,35 +259,73 @@ public:
             std::this_thread::sleep_for(std::chrono::microseconds{50});
         }
     }
+
 private:
     std::size_t idle_iterations_{0};
 };
 
+template <class Pump>
+void run_session(
+    volatile std::sig_atomic_t& running,
+    RingBuffer* ring,
+    UCXTransport& transport,
+    Pump& pump) {
+    IdleBackoff backoff;
+    while (running != 0 && !ringbuf_is_shutdown(ring)) {
+        bool activity = transport.progress();
+        activity = pump.progress() || activity;
+        backoff.update(activity);
+    }
+}
+
 }  // namespace
 
-void run_forwarder(
+void run_ingress_session(
     volatile std::sig_atomic_t& running,
-    RingBuffer* upstream,
-    RingBuffer* downstream,
+    RingBuffer* input,
     UCXTransport& transport,
-    const UCXMemoryRegion& upstream_memory,
-    const UCXMemoryRegion& downstream_memory) {
-    if (upstream == nullptr || downstream == nullptr ||
-        !upstream_memory.valid() || !downstream_memory.valid()) {
+    const UCXMemoryRegion& input_memory) {
+    if (input == nullptr || !input_memory.valid()) {
         throw std::invalid_argument(
-            "forwarder requires rings and registered memory");
+            "ingress requires a ring and registered memory");
     }
-    exchange_and_validate_contracts(upstream, downstream, transport);
-    OutboundPump outbound{downstream, transport, downstream_memory};
-    InboundPump inbound{upstream, transport, upstream_memory};
-    IdleBackoff backoff;
-    while (running != 0 &&
-           !ringbuf_is_shutdown(upstream) &&
-           !ringbuf_is_shutdown(downstream)) {
-        bool activity = transport.progress();
-        activity = outbound.progress() || activity;
-        activity = inbound.progress() || activity;
-        backoff.update(activity);
+    exchange_and_validate_contract(
+        input, protocol::PortRole::consumer, transport);
+    IngressPump pump{input, transport, input_memory};
+    run_session(running, input, transport, pump);
+}
+
+void run_egress_session(
+    volatile std::sig_atomic_t& running,
+    RingBuffer* output,
+    UCXTransport& transport,
+    const UCXMemoryRegion& output_memory) {
+    if (output == nullptr || !output_memory.valid()) {
+        throw std::invalid_argument(
+            "egress requires a ring and registered memory");
+    }
+    exchange_and_validate_contract(
+        output, protocol::PortRole::producer, transport);
+    EgressPump pump{output, transport, output_memory};
+    run_session(running, output, transport, pump);
+}
+
+DroppedFrames drop_stale_frames(RingBuffer* output) noexcept {
+    DroppedFrames dropped;
+    if (output == nullptr) {
+        return dropped;
+    }
+    for (;;) {
+        RingReadLease lease;
+        const RingResult result = ringbuf_acquire(output, lease);
+        if (result != RingResult::ok) {
+            return dropped;
+        }
+        ++dropped.frames;
+        dropped.bytes += lease.payload().size();
+        if (ringbuf_release(lease) != RingResult::ok) {
+            return dropped;
+        }
     }
 }
 
